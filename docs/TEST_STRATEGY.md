@@ -24,7 +24,7 @@ Safety:
 - alternate data stream syntax
 - reserved filenames
 - invalid characters
-- long paths where supported
+- unsupported long paths are blocked
 
 Rules:
 
@@ -39,7 +39,7 @@ Rules:
 Collisions:
 
 - existing destination blocks
-- deterministic auto-rename preview when enabled
+- auto-rename is not available in Milestone 1
 - apply detects destination created after preview
 - case-insensitive collision
 - case-only rename blocked
@@ -76,7 +76,7 @@ Use temp directories to simulate:
 
 - normal same-volume move through planner and operation abstraction
 - partial failure with one locked or mocked-denied file
-- interrupted cross-volume flow through mocked filesystem adapter
+- cross-volume operation is represented as unsupported
 - disappearing file after preview
 - destination appears after preview
 
@@ -99,3 +99,85 @@ Initial CI should run:
 - portable ZIP output verification once packaging exists
 
 CI must not run tests against real user folders.
+
+## Milestone 1 Acceptance Matrix
+
+Milestone 1 cannot be considered complete without these tests.
+
+### Windows Path Safety
+
+- drive-relative path is blocked
+- filesystem root is blocked
+- UNC path/share is blocked
+- `\\?\` extended logical path is blocked
+- ADS syntax is blocked
+- reserved device name is blocked
+- trailing dot name is blocked
+- trailing space name is blocked
+- path escape outside selected root is blocked
+- case-equivalent collision is blocked
+- ambiguous Unicode normalization case is blocked or marked unsupported
+
+### Reparse
+
+- selected root junction is blocked
+- parent junction is blocked
+- nested child junction is blocked
+- symlink is blocked
+- mount/reparse indicator is blocked
+- unknown reparse classification is blocked
+- redirect introduced after preview makes plan stale/blocked
+- reparse inspection failure fails closed
+
+### Identity
+
+- same file unchanged revalidates
+- file replaced at same pathname is stale
+- identity mismatch is stale
+- source removed is stale
+- root identity changed is stale
+- hardlink identity behavior is documented and tested
+- identity unavailable for actionable file becomes unsupported/safety block
+
+### Stale Plan
+
+- destination collision introduced after preview is stale
+- rule changed after preview is stale
+- category map changed after preview is stale
+- safety state changed after preview is stale
+- cloud/reparse classification changed after preview is stale
+
+### Rules
+
+- deterministic priority ordering
+- priority tie behavior by `(priority, sort_order, id)`
+- case-insensitive filename match
+- case-insensitive extension match
+- normalized relative-subfolder match
+- stable explanation output
+- rules produce planning intent only
+
+### Journal
+
+- intent recorded before mocked execution
+- interrupted state represented
+- recovery-required state represented
+- partial batch represented
+- no operation silently treated as successful after interruption
+- startup recovery does not auto-mark in-progress work as succeeded or failed
+
+### Collision
+
+- no overwrite
+- no auto-renaming
+- exact destination remains fixed
+- collision after preview makes operation stale/blocked
+
+### Cloud
+
+- known placeholder blocked
+- offline/unhydrated cloud file blocked
+- unknown cloud reparse state blocked
+- placeholder is not hashed or hydrated
+
+Use injectable/testable filesystem abstractions for Windows-specific conditions that cannot be reliably created everywhere.

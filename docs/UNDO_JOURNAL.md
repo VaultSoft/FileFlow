@@ -11,6 +11,38 @@ Undo is part of the design before file execution exists. FileFlow should use SQL
 - Undo never overwrites user data.
 - FileFlow can explain why an operation cannot be undone.
 
+## Crash-Aware States
+
+Operation lifecycle:
+
+- `PLANNED`
+- `APPROVED`
+- `INTENT_RECORDED`
+- `IN_PROGRESS`
+- `VERIFYING`
+- `SUCCEEDED`
+- `FAILED`
+- `BLOCKED`
+- `INTERRUPTED`
+- `RECOVERY_REQUIRED`
+
+Undo lifecycle:
+
+- `UNDO_PLANNED`
+- `UNDO_APPROVED`
+- `UNDO_INTENT_RECORDED`
+- `UNDO_IN_PROGRESS`
+- `UNDO_VERIFYING`
+- `UNDO_SUCCEEDED`
+- `UNDO_FAILED`
+- `UNDO_BLOCKED`
+- `UNDO_INTERRUPTED`
+- `UNDO_RECOVERY_REQUIRED`
+
+Filesystem operations and SQLite cannot be made atomic together. Future real apply and undo must record intent and commit it before touching the filesystem, then verify and commit the final result afterward.
+
+Startup recovery rule: any batch or operation left in an in-progress state is not automatically marked succeeded or failed. It becomes `RECOVERY_REQUIRED` and must be inspected against filesystem identity and state before any conclusion.
+
 ## Batch Record
 
 Each applied batch should store:
@@ -28,7 +60,7 @@ Each applied batch should store:
 - safety policy version
 - rule set version
 - category mapping version
-- status: `APPROVED`, `APPLYING`, `COMPLETED`, `COMPLETED_WITH_FAILURES`, `ABORTED`
+- status: `APPROVED`, `APPLYING`, `COMPLETED`, `COMPLETED_WITH_FAILURES`, `ABORTED`, `INTERRUPTED`, `RECOVERY_REQUIRED`
 - operation counts by status
 
 ## Executed Operation Record
@@ -43,8 +75,8 @@ Each executed operation should store:
 - destination path
 - source metadata before operation
 - destination metadata after operation
-- file identity before operation where available
-- file identity after operation where available
+- file identity before operation
+- file identity after operation
 - size before and after
 - timestamps before and after
 - result: `SUCCEEDED`, `FAILED`, `SKIPPED`, `STALE`, `BLOCKED`
@@ -54,6 +86,8 @@ Each executed operation should store:
 - undo status
 - undo attempted timestamp
 - undo result error code if any
+
+Identity fields use `FileIdentity`, not path metadata alone. Metadata snapshots are stored separately from identity.
 
 ## Undo Eligibility
 
@@ -96,7 +130,9 @@ Undo must never silently choose a different restoration path. If the original pa
 
 ## Cross-Volume Considerations
 
-Cross-volume moves may be implemented as copy, verify, then remove source. Undo for such operations is only safe when the journal proves:
+Cross-volume real moves are not supported in the first real-operation milestone. They should be represented as `UNSUPPORTED` until the future design proves copy, verification, source removal, interruption handling, and recovery.
+
+Future cross-volume undo is only safe when the journal proves:
 
 - the destination copy was verified
 - the source removal completed

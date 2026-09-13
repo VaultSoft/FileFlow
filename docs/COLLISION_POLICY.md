@@ -18,9 +18,11 @@ Initial safe defaults:
 - Existing destination: `BLOCK`.
 - Case-insensitive collision: `BLOCK`.
 - Invalid name: `BLOCK`.
-- Auto-rename: optional setting, off by default for the first implementation.
+- Auto-rename: deferred.
 
 ## Auto-Rename
+
+Auto-rename is not part of Milestone 1 or the first real move milestone. Initial collision behavior is `BLOCK`.
 
 If enabled later, auto-renaming must be deterministic:
 
@@ -43,4 +45,18 @@ On Windows, FileFlow should compare destination paths using case-insensitive sem
 - case-only rename attempts
 - names that differ only by normalization or trailing characters Windows ignores
 
-Initial behavior is to block case-only renames unless a tested safe rename strategy exists.
+Decision: case-only rename is `UNSUPPORTED` initially. FileFlow should not implement a two-step temporary-name strategy in Milestone 1 or the first real move milestone.
+
+## Windows Name Equivalence
+
+Collision checks use Windows case-insensitive semantics, normalized separators, and conservative Unicode-normalization checks. FileFlow blocks:
+
+- reserved device names
+- trailing dot names
+- trailing space names
+- alternate data stream syntax
+- unsupported long paths
+- unsupported case-equivalent collisions
+- ambiguous normalization cases
+
+These are safety/unsupported conditions, not ordinary execution failures.

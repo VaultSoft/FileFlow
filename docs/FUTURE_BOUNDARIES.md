@@ -74,26 +74,49 @@ Scheduling should:
 
 Settle before coding:
 
-- exact Windows reparse-point detection strategy
-- file identity metadata available from Python 3.11 on Windows
-- long path policy
-- OneDrive placeholder handling
-- case-only rename strategy
-- whether recursive scanning is included in milestone 1
-- whether auto-rename is included in milestone 1 or deferred
 - where SQLite database lives
 - what metadata change tolerance makes a plan stale
+- exact Win32/ctypes implementation details for `WindowsFileIdentityProvider`
+- exact Win32/ctypes implementation details for `ReparseInspector`
+- future policy for ACL/security descriptor preservation
+- future policy for ADS preservation in cross-volume operations
+- future UX for user-driven collision decisions
 
 ## Recommended First Implementation Milestone
 
-Build a non-GUI core slice with tests:
+Build a non-destructive core slice with tests:
 
 1. category defaults
-2. rule engine
-3. safety path classifier
-4. preview planner for immediate-child files only
-5. SQLite schema and migrations
-6. stale-plan revalidation
-7. no apply engine yet except a mocked operation interface
+2. deterministic basic rule engine
+3. Windows logical path model
+4. explicit path support/block classifier
+5. reparse inspector abstraction
+6. Windows `FileIdentity` abstraction
+7. immediate-child scanner/planner
+8. explicit `PreviewPlan` and `PlannedOperation` models
+9. category/rule snapshots
+10. SQLite schema and migrations
+11. crash-aware journal state machine
+12. stale-plan revalidation
+13. mocked operation interface
+14. structured error/safety classifications
+15. comprehensive tests
 
-This gives FileFlow a safe foundation before any real file-moving code exists.
+Not included:
+
+- real move
+- real rename
+- directory creation as an applied operation
+- delete
+- undo execution
+- GUI Apply
+- recursion
+- auto-rename
+- case-only rename
+- cross-volume operation
+- cloud hydration
+- duplicate detection
+- monitoring
+- scheduling
+
+Milestone 1 must have no capability to alter user files.

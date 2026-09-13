@@ -4,6 +4,8 @@ Preview and Apply are FileFlow's central contract.
 
 Preview creates an explicit operation plan. Apply attempts only that approved plan after revalidation. Apply does not rediscover files, rerun rules, recalculate destination names, or silently adjust the plan.
 
+Milestone 1 is non-destructive. It models preview, stale revalidation, and a mocked operation interface only. It must have no capability to alter user files.
+
 ## Plan Lifecycle
 
 - `DRAFT`: generated but not approved.
@@ -13,6 +15,26 @@ Preview creates an explicit operation plan. Apply attempts only that approved pl
 - `STALE`: plan no longer matches the filesystem or rule state.
 - `BLOCKED`: safety policy prevents one or more required operations.
 - `ABANDONED`: user discarded the preview.
+
+## What Preview Freezes
+
+Preview freezes:
+
+- selected root logical path and root identity
+- relevant existing path-component identity/reparse state
+- source logical path
+- source `FileIdentity`
+- source `MetadataSnapshot`
+- intended destination logical path
+- destination parent state
+- rule ID and rule snapshot
+- category mapping snapshot
+- collision and safety classification
+- cloud/reparse classification
+- path policy version
+- safety policy version
+
+Apply must attempt exactly this frozen plan or refuse with `STALE_PLAN` / `SAFETY_BLOCK`.
 
 ## Planned Operation Fields
 
@@ -36,12 +58,33 @@ Each planned operation should contain:
 - source modified time
 - source created time where available
 - source file attributes
-- source volume identity where available
-- source file identity where available
-- source link count where available
+- source `FileIdentity`
+- source link count from identity provider when available
 - source content fingerprint state, such as none, metadata-only, partial hash, or full hash
 - destination parent status
 - preview timestamp
+
+## FileIdentity and MetadataSnapshot
+
+`FileIdentity` is not path + size + mtime. For Windows actionable files, the plan must use handle-based filesystem identity supplied by a `FileIdentityProvider`.
+
+Minimum logical `FileIdentity`:
+
+- volume serial number or equivalent volume identity
+- Windows file ID / file index
+- file type
+- link count where available
+
+Supporting `MetadataSnapshot`:
+
+- logical pathname
+- size
+- mtime
+- ctime
+- attributes
+- reparse status/tag
+
+If identity cannot be obtained for a file that would eventually be actionable, the operation is `UNSUPPORTED` or `SAFETY_BLOCK`, not safe. Stale revalidation must detect replacement of a file at the same pathname.
 
 ## Safety Status
 
@@ -101,6 +144,28 @@ Immediately before apply, FileFlow must revalidate:
 
 Any failed revalidation makes the operation `STALE` or `BLOCKED`. A stale plan requires re-preview.
 
+## Exact Stale-Plan Conditions
+
+A plan or operation becomes stale when:
+
+- source identity changed
+- source disappeared
+- source was replaced at the same pathname
+- selected-root identity changed
+- relevant path component identity changed
+- relevant path component reparse state changed
+- destination now exists when it did not at preview
+- destination identity/state changed
+- rule snapshot differs
+- category mapping snapshot differs
+- approved root/path policy differs
+- safety classification changed
+- cloud classification changed
+- reparse classification changed
+- path containment no longer holds under logical Windows comparison
+
+`STALE_PLAN` means the user must preview again. Apply must not silently regenerate, repair, re-run rules, select a different destination, or continue as if the new filesystem state had been approved.
+
 ## Valid, Stale, and Blocked
 
 `VALID` means every batch-level and operation-level revalidation check passed.
@@ -127,3 +192,17 @@ Initial safe defaults:
 - Skip individual stale operations only if the UI explicitly presents this policy before apply.
 - Continue unrelated safe operations after ordinary file I/O failures.
 - Never continue after detecting destination boundary escape.
+
+## Journal Ordering for Future Apply
+
+Filesystem operations and SQLite commits cannot be one atomic transaction. Future real apply must use this ordering:
+
+1. validate plan
+2. record operation intent
+3. commit journal state
+4. perform filesystem operation
+5. verify result
+6. record final result
+7. commit result
+
+Milestone 1 should model and test this state machine using a mocked operation interface.

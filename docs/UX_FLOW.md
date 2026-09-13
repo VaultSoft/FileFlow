@@ -22,7 +22,7 @@ Elements:
 - folder picker
 - selected path
 - safety status
-- scan options: immediate children only by default, recursive later or opt-in
+- scan scope: immediate child files only in Milestone 1; recursive analysis appears only after a future reviewed design
 - disabled Apply path until preview exists
 
 ## Analyse
@@ -143,8 +143,8 @@ Purpose: safe preferences.
 Elements:
 
 - default preview mode
-- recursive scanning opt-in
-- auto-rename setting, initially off
+- recursive scanning controls only after a future reviewed implementation
+- auto-rename setting only after a future reviewed implementation
 - history retention
 - database location
 - diagnostics/export logs

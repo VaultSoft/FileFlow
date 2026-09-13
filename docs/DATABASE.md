@@ -14,6 +14,35 @@ Use a `schema_migrations` table:
 
 Application startup checks the current schema version and applies forward-only migrations. Failed migrations abort startup with a clear error.
 
+## Crash-Aware State Model
+
+Use coherent operation states across plan, batch, execution, and undo tables:
+
+- `PLANNED`
+- `APPROVED`
+- `INTENT_RECORDED`
+- `IN_PROGRESS`
+- `VERIFYING`
+- `SUCCEEDED`
+- `FAILED`
+- `BLOCKED`
+- `INTERRUPTED`
+- `RECOVERY_REQUIRED`
+
+Undo uses corresponding `UNDO_*` states.
+
+SQLite and filesystem operations cannot be atomic together. Future execution must use this journal ordering:
+
+1. validate plan
+2. record operation intent
+3. commit journal state
+4. perform filesystem operation
+5. verify result
+6. record final result
+7. commit result
+
+Startup recovery: any operation or batch left in `INTENT_RECORDED`, `IN_PROGRESS`, or `VERIFYING` becomes `RECOVERY_REQUIRED`. FileFlow must inspect filesystem identity/state before deciding whether it succeeded, failed, or needs user action.
+
 ## Proposed Tables
 
 ### app_metadata
@@ -70,6 +99,7 @@ Index: `(profile_id, enabled, priority)`.
 - `profile_id TEXT NOT NULL`
 - `source_root TEXT NOT NULL`
 - `source_root_normalized TEXT NOT NULL`
+- `source_root_identity_json TEXT NOT NULL`
 - `destination_root TEXT`
 - `status TEXT NOT NULL`
 - `rule_set_version INTEGER NOT NULL`
@@ -96,6 +126,7 @@ Indexes: `(status, created_at)`, `(profile_id, created_at)`.
 - `conflict_status TEXT NOT NULL`
 - `reversible INTEGER NOT NULL`
 - `metadata_json TEXT NOT NULL`
+- `identity_json TEXT NOT NULL`
 - `preview_index INTEGER NOT NULL`
 
 Indexes: `(plan_id, preview_index)`, `(plan_id, safety_status)`, `(plan_id, conflict_status)`.
@@ -111,6 +142,7 @@ Indexes: `(plan_id, preview_index)`, `(plan_id, safety_status)`, `(plan_id, conf
 - `completed_at TEXT`
 - `app_version TEXT NOT NULL`
 - `summary_json TEXT NOT NULL`
+- `recovery_required INTEGER NOT NULL DEFAULT 0`
 
 Indexes: `(status, started_at)`, `(profile_id, started_at)`.
 
@@ -127,6 +159,8 @@ Indexes: `(status, started_at)`, `(profile_id, started_at)`.
 - `error_detail TEXT`
 - `metadata_before_json TEXT NOT NULL`
 - `metadata_after_json TEXT`
+- `identity_before_json TEXT`
+- `identity_after_json TEXT`
 - `undo_eligible INTEGER NOT NULL`
 - `undo_status TEXT NOT NULL`
 - `started_at TEXT NOT NULL`

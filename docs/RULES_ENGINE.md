@@ -24,13 +24,19 @@ Future Pro-capable rules can add monitoring, profiles, duplicate handling, and a
 
 Initial default:
 
-- rules have explicit priority
+- rules have explicit `priority`, `sort_order`, and stable rule ID
+- lower numeric `priority` runs first
+- ties are resolved by `(priority, sort_order, id)`
 - first matching enabled rule wins
 - fallback rule is "do not move" unless the user enables an "Other" destination
 - disabled rules are ignored but preserved
 - each match records rule ID, rule version, and explanation
 
 Multi-match behavior should be deferred until it has a clear UI. It is harder to explain and easier to make unsafe.
+
+Filename matching defaults to Windows case-insensitive behavior. Extension matching is case-insensitive. Source subfolder matching uses normalized root-relative logical paths only, never raw absolute strings.
+
+Rules never receive permission to perform filesystem changes. They produce planning intent only.
 
 ## Rule Conflicts
 
@@ -90,5 +96,9 @@ Each planned operation should show:
 - category
 - destination folder
 - reason text, for example: "Extension .jpg matched Images"
+- rule ID
+- rule version or rule snapshot
 
 Rules should be deterministic and testable without a GUI.
+
+Rule changes after preview make the existing preview stale.

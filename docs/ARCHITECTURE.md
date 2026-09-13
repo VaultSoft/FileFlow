@@ -39,6 +39,7 @@ FileFlow/
       duplicate_service.py
     safety/
       paths.py
+      identity.py
       reparse.py
       names.py
       roots.py
@@ -83,6 +84,13 @@ Plain dataclasses or typed structures for paths, rules, plans, history, and erro
 
 Centralized path and filesystem policy. Every scanner, planner, apply, and undo path goes through safety checks.
 
+Milestone 1 safety abstractions:
+
+- `FileIdentityProvider`: supplies handle-based logical identity for Windows files, roots, and relevant path components.
+- `WindowsFileIdentityProvider`: future Windows implementation boundary. Exact ctypes/Win32 details are not chosen in the design docs.
+- `ReparseInspector`: classifies reparse state per path component without trusting `Path.resolve()`.
+- `WindowsPathPolicy`: accepts only normal absolute local drive paths under an approved root and blocks unsupported Windows path forms.
+
 ### Services
 
 Business logic:
@@ -115,3 +123,42 @@ FileFlow should start compliant with the VaultSoft release standard:
 - release workflow separate from verification
 
 Do not add release automation until implementation needs packaging.
+
+## Revised Milestone 1: Non-Destructive Core
+
+Implement later:
+
+- category defaults
+- deterministic basic rule engine
+- Windows logical path model
+- explicit path support/block classifier
+- reparse inspector abstraction
+- Windows `FileIdentity` abstraction
+- immediate-child scanner/planner
+- explicit `PreviewPlan` and `PlannedOperation` models
+- category/rule snapshots
+- SQLite schema and migrations
+- crash-aware journal state machine
+- stale-plan revalidation
+- mocked operation interface
+- structured error/safety classifications
+- comprehensive tests
+
+Explicitly not part of Milestone 1:
+
+- real move
+- real rename
+- directory creation as an applied operation
+- delete
+- undo execution
+- GUI Apply
+- recursion
+- auto-rename
+- case-only rename
+- cross-volume operation
+- cloud hydration
+- duplicate detection
+- monitoring
+- scheduling
+
+Milestone 1 must have no capability to alter user files.

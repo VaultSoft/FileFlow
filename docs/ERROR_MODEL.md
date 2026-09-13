@@ -23,6 +23,9 @@ FileFlow should use structured errors as primary application state.
 - `RULE_CHANGED`
 - `METADATA_CHANGED`
 - `CLOUD_PLACEHOLDER`
+- `UNSUPPORTED`
+- `INTERRUPTED`
+- `RECOVERY_REQUIRED`
 - `UNKNOWN_IO_ERROR`
 
 ## Severity
@@ -31,6 +34,7 @@ FileFlow should use structured errors as primary application state.
 - `OPERATION_BLOCKING`: prevents one operation.
 - `RECOVERABLE`: operation failed but unrelated operations may continue.
 - `WARNING`: user should see context, but operation may be safe.
+- `RECOVERY`: persisted state requires inspection after interruption/crash.
 
 ## Classification
 
@@ -41,6 +45,8 @@ Blocking:
 - plan stale at batch level
 - destination boundary escape
 - unsafe reparse point in selected root
+- unsupported Windows path form
+- unsupported cloud placeholder state
 
 Operation-blocking:
 
@@ -57,5 +63,12 @@ Recoverable:
 - individual copy failure
 - disk full for one operation
 - destination volume unavailable
+
+Recovery:
+
+- operation had intent recorded but no final result
+- process exited during apply/undo
+- startup found an in-progress batch
+- filesystem must be inspected before classifying outcome
 
 Safety blocks should be grouped separately from ordinary errors in the UI.

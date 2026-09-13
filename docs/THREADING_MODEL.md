@@ -35,7 +35,7 @@ Apply cancellation is more constrained:
 
 - cancellation requests stop before the next operation
 - an operation already in progress is allowed to complete or fail
-- cross-volume staged operations must complete their current safe stage before stopping
+- future cross-volume staged operations must complete their current safe stage before stopping
 - cancellation is journaled as batch status, not hidden
 
 ## Progress
