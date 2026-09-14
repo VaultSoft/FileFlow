@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ntpath
+import os
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Callable
 
 from .app_metadata import SAFETY_POLICY_VERSION
 from .models import (
@@ -39,10 +40,12 @@ class PreviewPlanner:
         path_policy: WindowsPathPolicy,
         chain_safety: PathChainSafety,
         identity_provider: FileIdentityProvider,
+        entry_exists: Callable[[str], bool] | None = None,
     ):
         self.path_policy = path_policy
         self.chain_safety = chain_safety
         self.identity_provider = identity_provider
+        self.entry_exists = entry_exists or os.path.lexists
 
     def create_plan(
         self,
@@ -127,21 +130,22 @@ class PreviewPlanner:
                 )
                 preview_index += 1
                 continue
-            destination_chain = self.chain_safety.classify_chain(destination.normalized_path, destination_decision.normalized_path)
-            if not destination_chain.allowed:
+            destination_parent = ntpath.dirname(destination.normalized_path)
+            destination_parent_chain = self.chain_safety.classify_chain(destination_parent, destination_decision.normalized_path)
+            if not destination_parent_chain.allowed:
                 operations.append(
                     self._blocked_operation(
                         item,
                         root_decision.normalized_path,
                         preview_index,
-                        reason="Planned destination path chain is unsafe.",
+                        reason="Planned destination parent path chain is unsafe.",
                         destination_path=destination.normalized_path,
-                        safety=destination_chain,
+                        safety=destination_parent_chain,
                     )
                 )
                 preview_index += 1
                 continue
-            if Path(destination.normalized_path).exists():
+            if self.entry_exists(destination.normalized_path):
                 operations.append(
                     self._blocked_operation(
                         item,
@@ -254,11 +258,13 @@ class PlanRevalidator:
         chain_safety: PathChainSafety,
         identity_provider: FileIdentityProvider,
         cloud_classifier: CloudClassifier | None = None,
+        entry_exists: Callable[[str], bool] | None = None,
     ):
         self.path_policy = path_policy
         self.chain_safety = chain_safety
         self.identity_provider = identity_provider
         self.cloud_classifier = cloud_classifier
+        self.entry_exists = entry_exists or os.path.lexists
 
     def revalidate(
         self,
@@ -308,7 +314,7 @@ class PlanRevalidator:
             if root_chain.error:
                 errors.append(root_chain.error)
         root_identity = self.identity_provider.snapshot(plan.source_root_normalized)
-        if not root_identity.supported or root_identity.snapshot != plan.source_root_identity:
+        if not root_identity.supported or root_identity.snapshot is None or root_identity.snapshot.identity != plan.source_root_identity.identity:
             stale_reasons.append(RevalidationReason.ROOT_IDENTITY_CHANGED)
             if root_identity.error:
                 errors.append(root_identity.error)
@@ -327,7 +333,7 @@ class PlanRevalidator:
             if destination_root_chain.error:
                 errors.append(destination_root_chain.error)
         destination_root_identity = self.identity_provider.snapshot(plan.destination_root)
-        if not destination_root_identity.supported or destination_root_identity.snapshot != plan.destination_root_identity:
+        if not destination_root_identity.supported or destination_root_identity.snapshot is None or destination_root_identity.snapshot.identity != plan.destination_root_identity.identity:
             stale_reasons.append(RevalidationReason.DESTINATION_ROOT_IDENTITY_CHANGED)
             if destination_root_identity.error:
                 errors.append(destination_root_identity.error)
@@ -426,7 +432,7 @@ class PlanRevalidator:
             )
             return
 
-        if Path(destination_policy.normalized_path).exists():
+        if self.entry_exists(destination_policy.normalized_path):
             stale_reasons.append(RevalidationReason.DESTINATION_APPEARED)
             errors.append(
                 StructuredError(

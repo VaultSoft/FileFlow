@@ -62,6 +62,27 @@ class ScannerIntegrationTests(unittest.TestCase):
             self.assertEqual(SafetyReason.SCAN_FAILED, items[0].safety.reason)
             self.assertIsNotNone(items[0].safety.error)
 
+    def test_identity_provider_exception_becomes_structured_scan_failure(self):
+        class RaisingIdentityProvider:
+            def snapshot(self, logical_path):
+                raise RuntimeError("identity backend failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child = root / "photo.jpg"
+            child.write_text("x", encoding="utf-8")
+            policy = WindowsPathPolicy()
+            scanner = ImmediateChildScanner(
+                policy,
+                PathChainSafety(policy, FakeReparseInspector()),
+                RaisingIdentityProvider(),
+                ConservativeCloudClassifier(),
+            )
+            items = scanner.scan(str(root))
+            self.assertEqual(1, len(items))
+            self.assertEqual(SafetyReason.SCAN_FAILED, items[0].safety.reason)
+            self.assertIn("identity backend failed", items[0].safety.error.details["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

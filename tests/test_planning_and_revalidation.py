@@ -18,6 +18,7 @@ from fileflow.models import (
 from fileflow.planner import PlanRevalidator, PreviewPlanner
 from fileflow.rules import default_categories, default_rules
 from fileflow.safety import FakeIdentityProvider, FakeReparseInspector, PathChainSafety, WindowsPathPolicy
+from fileflow.safety import WindowsReparseInspector
 
 
 def snapshot(path, file_id=None, file_type="file"):
@@ -262,6 +263,123 @@ class PlanningTests(unittest.TestCase):
             default_categories(),
         )
         self.assertEqual(RevalidationStatus.VALID, result.status)
+
+    def test_missing_destination_leaf_can_be_planned_when_parent_exists_and_is_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_path = Path(tmp)
+            (root_path / "Images").mkdir()
+            source_path = root_path / "Photo.JPG"
+            source_path.write_text("x", encoding="utf-8")
+            root = self.policy.normalize(str(root_path))
+            source = self.policy.normalize(str(source_path))
+            identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "photo")}
+            item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
+            plan = PreviewPlanner(
+                self.policy,
+                PathChainSafety(self.policy, WindowsReparseInspector()),
+                FakeIdentityProvider(identities),
+            ).create_plan(
+                profile_id="default",
+                source_root=root,
+                destination_root=root,
+                items=(item,),
+                rules=default_rules(default_categories()),
+                categories=default_categories(),
+            )
+            self.assertEqual(PlannedOperationStatus.PLANNED, plan.operations[0].safety_status)
+            self.assertFalse(Path(plan.operations[0].destination_path).exists())
+
+    def test_missing_destination_parent_is_blocked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_path = Path(tmp)
+            source_path = root_path / "Photo.JPG"
+            source_path.write_text("x", encoding="utf-8")
+            root = self.policy.normalize(str(root_path))
+            source = self.policy.normalize(str(source_path))
+            identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "photo")}
+            item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
+            plan = PreviewPlanner(
+                self.policy,
+                PathChainSafety(self.policy, WindowsReparseInspector()),
+                FakeIdentityProvider(identities),
+            ).create_plan(
+                profile_id="default",
+                source_root=root,
+                destination_root=root,
+                items=(item,),
+                rules=default_rules(default_categories()),
+                categories=default_categories(),
+            )
+            self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
+
+    def test_dangling_destination_entry_counts_as_occupied(self):
+        root = r"C:\FileFlowTest\Root"
+        source = r"C:\FileFlowTest\Root\Photo.JPG"
+        destination = r"C:\FileFlowTest\Root\Images\Photo.JPG"
+        identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "photo")}
+        item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
+        planner = PreviewPlanner(
+            self.policy,
+            self.chain,
+            FakeIdentityProvider(identities),
+            entry_exists=lambda candidate: candidate.casefold() == destination.casefold(),
+        )
+        plan = planner.create_plan(
+            profile_id="default",
+            source_root=root,
+            destination_root=root,
+            items=(item,),
+            rules=default_rules(default_categories()),
+            categories=default_categories(),
+        )
+        self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
+        self.assertEqual(SafetyReason.DESTINATION_EXISTS, plan.operations[0].structured_error.details.get("reason", SafetyReason.DESTINATION_EXISTS))
+
+    def test_root_directory_mtime_change_does_not_stale_when_identity_is_same(self):
+        root = r"C:\FileFlowTest\Root"
+        source = r"C:\FileFlowTest\Root\Photo.JPG"
+        root_original = snapshot(root, "root", "directory")
+        root_changed_metadata = IdentitySnapshot(root_original.identity, MetadataSnapshot(root, 999, 999, 999))
+        source_snapshot = snapshot(source, "photo")
+        identities = {root: root_original, source: source_snapshot}
+        item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), source_snapshot)
+        plan = self.planner_with_identities(identities).create_plan(
+            profile_id="default",
+            source_root=root,
+            destination_root=root,
+            items=(item,),
+            rules=default_rules(default_categories()),
+            categories=default_categories(),
+        )
+        result = PlanRevalidator(
+            self.policy,
+            self.chain,
+            FakeIdentityProvider({root: root_changed_metadata, source: source_snapshot}),
+        ).revalidate(plan, default_rules(default_categories()), default_categories())
+        self.assertEqual(RevalidationStatus.VALID, result.status)
+
+    def test_root_identity_change_stales_plan(self):
+        root = r"C:\FileFlowTest\Root"
+        source = r"C:\FileFlowTest\Root\Photo.JPG"
+        source_snapshot = snapshot(source, "photo")
+        identities = {root: snapshot(root, "root", "directory"), source: source_snapshot}
+        item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), source_snapshot)
+        plan = self.planner_with_identities(identities).create_plan(
+            profile_id="default",
+            source_root=root,
+            destination_root=root,
+            items=(item,),
+            rules=default_rules(default_categories()),
+            categories=default_categories(),
+        )
+        changed_root = snapshot(root, "different-root", "directory")
+        result = PlanRevalidator(
+            self.policy,
+            self.chain,
+            FakeIdentityProvider({root: changed_root, source: source_snapshot}),
+        ).revalidate(plan, default_rules(default_categories()), default_categories())
+        self.assertEqual(RevalidationStatus.STALE, result.status)
+        self.assertIn(RevalidationReason.ROOT_IDENTITY_CHANGED, result.reasons)
 
 
 if __name__ == "__main__":

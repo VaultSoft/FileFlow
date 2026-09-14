@@ -133,7 +133,24 @@ class ImmediateChildScanner:
                     )
                 )
                 continue
-            cloud = self.cloud_classifier.classify(child_path)
+            try:
+                cloud = self.cloud_classifier.classify(child_path)
+            except Exception as exc:
+                items.append(
+                    ScannedItem(
+                        child_path,
+                        relative_path,
+                        ScannedItemKind.FILE,
+                        SafetyDecision.unsupported(
+                            SafetyReason.SCAN_FAILED,
+                            "Cloud classification failed.",
+                            normalized_path=child_decision.normalized_path,
+                            code=ErrorCode.UNKNOWN_IO_ERROR,
+                            details={"path": child_path, "error": str(exc)},
+                        ),
+                    )
+                )
+                continue
             if not cloud.safe:
                 items.append(
                     ScannedItem(
@@ -144,7 +161,24 @@ class ImmediateChildScanner:
                     )
                 )
                 continue
-            identity_result = self.identity_provider.snapshot(child_decision.normalized_path)
+            try:
+                identity_result = self.identity_provider.snapshot(child_decision.normalized_path)
+            except Exception as exc:
+                items.append(
+                    ScannedItem(
+                        child_path,
+                        relative_path,
+                        ScannedItemKind.FILE,
+                        SafetyDecision.unsupported(
+                            SafetyReason.SCAN_FAILED,
+                            "Identity inspection failed.",
+                            normalized_path=child_decision.normalized_path,
+                            code=ErrorCode.UNKNOWN_IO_ERROR,
+                            details={"path": child_decision.normalized_path, "error": str(exc)},
+                        ),
+                    )
+                )
+                continue
             if not identity_result.supported:
                 items.append(
                     ScannedItem(
