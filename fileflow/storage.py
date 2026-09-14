@@ -101,6 +101,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         );
         CREATE TABLE IF NOT EXISTS operation_state_event (
             id TEXT PRIMARY KEY,
+            executed_operation_id TEXT NOT NULL,
             batch_id TEXT NOT NULL,
             planned_operation_id TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -120,6 +121,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         CREATE INDEX IF NOT EXISTS idx_planned_operation_plan_index ON planned_operation(plan_id, preview_index);
         CREATE INDEX IF NOT EXISTS idx_planned_operation_status ON planned_operation(plan_id, safety_status);
         CREATE INDEX IF NOT EXISTS idx_executed_operation_batch_result ON executed_operation(batch_id, result);
+        CREATE INDEX IF NOT EXISTS idx_operation_state_event_execution ON operation_state_event(executed_operation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_operation_state_event_operation ON operation_state_event(planned_operation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_error_event_scope ON error_event(scope, scope_id);
         """,

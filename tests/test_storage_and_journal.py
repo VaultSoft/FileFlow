@@ -3,7 +3,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from fileflow.journal import JournalCoordinator, JournalStateMachine, MockExecutorConfig, MockOperationExecutor
+from fileflow.journal import JournalCoordinator, JournalExecutionBlocked, JournalStateMachine, MockExecutorConfig, MockOperationExecutor
 from fileflow.models import ExecutionOutcome, JournalState, PlannedOperationStatus, RevalidationReason, RevalidationStatus, SafetyDecision, ScannedItem, ScannedItemKind
 from fileflow.planner import PlanRevalidator, PreviewPlanner
 from fileflow.rules import default_categories, default_rules
@@ -110,6 +110,17 @@ class StorageAndJournalTests(unittest.TestCase):
             history,
         )
 
+    def test_batch_in_progress_and_started_at_are_persisted(self):
+        plan = self.make_plan()
+        batch_id = JournalCoordinator(self.db, MockOperationExecutor()).execute_mock_batch(
+            plan,
+            stop_after=JournalState.IN_PROGRESS,
+        )
+        batch = self.db.connection.execute("SELECT status, started_at, completed_at FROM operation_batch WHERE id = ?", (batch_id,)).fetchone()
+        self.assertEqual(JournalState.IN_PROGRESS.value, batch["status"])
+        self.assertIsNotNone(batch["started_at"])
+        self.assertIsNone(batch["completed_at"])
+
     def test_mock_journal_records_individual_failure_without_aborting_safe_work(self):
         plan = self.make_plan()
         op_id = plan.operations[0].id
@@ -127,9 +138,32 @@ class StorageAndJournalTests(unittest.TestCase):
         row = self.db.connection.execute("SELECT result FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
         self.assertEqual(JournalState.FAILED.value, row["result"])
         history = JournalCoordinator(self.db, MockOperationExecutor()).operation_state_history(op_id)
+        self.assertIn(JournalState.VERIFYING.value, history)
         self.assertNotIn(JournalState.SUCCEEDED.value, history)
 
-    def test_interruption_is_persisted_and_recoverable_after_restart(self):
+    def test_unresolved_states_are_discoverable_after_restart_and_refuse_reexecution(self):
+        for stop_state in (JournalState.INTENT_RECORDED, JournalState.IN_PROGRESS, JournalState.VERIFYING):
+            with self.subTest(stop_state=stop_state):
+                with tempfile.TemporaryDirectory() as tmp:
+                    db_path = Path(tmp) / "fileflow.db"
+                    db = Database(db_path)
+                    db.migrate()
+                    plan = self.make_plan()
+                    batch_id = JournalCoordinator(db, MockOperationExecutor()).execute_mock_batch(plan, stop_after=stop_state)
+                    db.close()
+
+                    reopened = Database(db_path)
+                    coordinator = JournalCoordinator(reopened, MockOperationExecutor())
+                    recovery_rows = coordinator.operations_requiring_recovery()
+                    self.assertEqual(1, len(recovery_rows))
+                    self.assertEqual(stop_state.value, recovery_rows[0]["result"])
+                    with self.assertRaises(JournalExecutionBlocked):
+                        coordinator.execute_mock_batch(plan)
+                    row = reopened.connection.execute("SELECT result FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
+                    self.assertEqual(stop_state.value, row["result"])
+                    reopened.close()
+
+    def test_interruption_is_persisted_recoverable_and_refuses_reexecution_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "fileflow.db"
             db = Database(db_path)
@@ -156,6 +190,11 @@ class StorageAndJournalTests(unittest.TestCase):
 
             reopened = Database(db_path)
             coordinator = JournalCoordinator(reopened, MockOperationExecutor())
+            recovery_rows = coordinator.operations_requiring_recovery()
+            self.assertEqual(1, len(recovery_rows))
+            self.assertEqual(JournalState.INTERRUPTED.value, recovery_rows[0]["result"])
+            with self.assertRaises(JournalExecutionBlocked):
+                coordinator.execute_mock_batch(plan)
             self.assertEqual(1, coordinator.mark_recovery_required())
             recovery_rows = coordinator.operations_requiring_recovery()
             self.assertEqual(1, len(recovery_rows))
@@ -164,6 +203,41 @@ class StorageAndJournalTests(unittest.TestCase):
             self.assertEqual(JournalState.RECOVERY_REQUIRED.value, batch["status"])
             self.assertEqual(1, batch["recovery_required"])
             reopened.close()
+
+    def test_same_plan_reexecution_is_refused_and_original_row_is_not_rewritten(self):
+        plan = self.make_plan()
+        coordinator = JournalCoordinator(
+            self.db,
+            MockOperationExecutor(MockExecutorConfig({plan.operations[0].id: ExecutionOutcome.INTERRUPTED})),
+        )
+        batch_id = coordinator.execute_mock_batch(plan)
+        original = self.db.connection.execute("SELECT id, result FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
+        self.assertEqual(JournalState.INTERRUPTED.value, original["result"])
+
+        with self.assertRaises(JournalExecutionBlocked):
+            JournalCoordinator(self.db, MockOperationExecutor()).execute_mock_batch(plan)
+
+        after = self.db.connection.execute("SELECT id, result FROM executed_operation WHERE id = ?", (original["id"],)).fetchone()
+        self.assertEqual(original["id"], after["id"])
+        self.assertEqual(JournalState.INTERRUPTED.value, after["result"])
+        self.assertEqual(1, self.db.connection.execute("SELECT COUNT(*) AS count FROM operation_batch").fetchone()["count"])
+
+    def test_later_resolved_batch_cannot_rewrite_earlier_execution_row(self):
+        plan = self.make_plan()
+        first_batch = JournalCoordinator(
+            self.db,
+            MockOperationExecutor(MockExecutorConfig({plan.operations[0].id: ExecutionOutcome.FAILED})),
+        ).execute_mock_batch(plan)
+        first_row = self.db.connection.execute("SELECT id, result FROM executed_operation WHERE batch_id = ?", (first_batch,)).fetchone()
+        self.assertEqual(JournalState.FAILED.value, first_row["result"])
+
+        second_batch = JournalCoordinator(self.db, MockOperationExecutor()).execute_mock_batch(plan)
+        second_row = self.db.connection.execute("SELECT id, result FROM executed_operation WHERE batch_id = ?", (second_batch,)).fetchone()
+        self.assertEqual(JournalState.SUCCEEDED.value, second_row["result"])
+
+        unchanged_first = self.db.connection.execute("SELECT result FROM executed_operation WHERE id = ?", (first_row["id"],)).fetchone()
+        self.assertEqual(JournalState.FAILED.value, unchanged_first["result"])
+        self.assertNotEqual(first_row["id"], second_row["id"])
 
     def test_partial_batch_state_is_represented(self):
         plan = self.make_plan()
