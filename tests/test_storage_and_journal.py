@@ -206,7 +206,7 @@ class StorageAndJournalTests(unittest.TestCase):
             self.assertEqual(JournalState.INTERRUPTED.value, recovery_rows[0]["result"])
             with self.assertRaises(JournalExecutionBlocked):
                 coordinator.execute_mock_batch(plan)
-            self.assertEqual(1, coordinator.mark_recovery_required())
+            self.assertEqual(1, coordinator.mark_recovery_required_for_batch(batch_id))
             recovery_rows = coordinator.operations_requiring_recovery()
             self.assertEqual(1, len(recovery_rows))
             self.assertEqual(JournalState.RECOVERY_REQUIRED.value, recovery_rows[0]["result"])
@@ -278,7 +278,7 @@ class StorageAndJournalTests(unittest.TestCase):
             "UPDATE executed_operation SET result = ? WHERE batch_id = ?",
             (JournalState.IN_PROGRESS.value, batch_id),
         )
-        count = JournalCoordinator(self.db, MockOperationExecutor()).mark_recovery_required()
+        count = JournalCoordinator(self.db, MockOperationExecutor()).mark_recovery_required_for_batch(batch_id)
         self.assertEqual(1, count)
         row = self.db.connection.execute("SELECT result FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
         self.assertEqual(JournalState.RECOVERY_REQUIRED.value, row["result"])

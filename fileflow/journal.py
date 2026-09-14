@@ -45,7 +45,7 @@ class JournalStateMachine:
         return requested
 
     def recoverable_states(self) -> tuple[JournalState, ...]:
-        return (JournalState.INTENT_RECORDED, JournalState.IN_PROGRESS, JournalState.VERIFYING, JournalState.INTERRUPTED)
+        return (JournalState.INTENT_RECORDED, JournalState.IN_PROGRESS, JournalState.VERIFYING, JournalState.INTERRUPTED, JournalState.RECOVERY_REQUIRED)
 
 
 class OperationExecutor(Protocol):
@@ -113,6 +113,7 @@ class JournalCoordinator:
 
     def execute_real_move_batch(self, plan: PreviewPlan, stop_after: JournalState | None = None) -> str:
         self._raise_if_plan_has_unresolved_work(plan.id)
+        self._raise_if_any_unresolved_real_work(plan.id)
         if not isinstance(self.executor, SameVolumeMoveExecutor):
             raise TypeError("execute_real_move_batch requires SameVolumeMoveExecutor.")
         batch_id = str(uuid.uuid4())
@@ -269,11 +270,35 @@ class JournalCoordinator:
         verification = executor.verify(preflight)
         if verification.outcome == ExecutionOutcome.SUCCEEDED:
             identity_after = executor.identity_provider.snapshot(operation.destination_path)
+            if not identity_after.supported or identity_after.snapshot is None:
+                state = self.state_machine.transition(state, JournalState.RECOVERY_REQUIRED)
+                self._update_execution(
+                    executed_id,
+                    state,
+                    identity_after.error
+                    or StructuredError(
+                        ErrorCode.VERIFICATION_FAILED,
+                        Severity.RECOVERY,
+                        "Destination identity could not be verified after move.",
+                        {"operation_id": operation.id, "destination": operation.destination_path},
+                    ),
+                )
+                return True
             state = self.state_machine.transition(state, JournalState.SUCCEEDED)
             self._update_execution(executed_id, state, None, identity_after.snapshot if identity_after.supported else None)
         else:
-            state = self.state_machine.transition(state, JournalState.FAILED)
-            self._update_execution(executed_id, state, verification.error)
+            state = self.state_machine.transition(state, JournalState.RECOVERY_REQUIRED)
+            self._update_execution(
+                executed_id,
+                state,
+                verification.error
+                or StructuredError(
+                    ErrorCode.RECOVERY_REQUIRED,
+                    Severity.RECOVERY,
+                    "Move completed but post-move verification could not prove success.",
+                    {"operation_id": operation.id, "destination": operation.destination_path},
+                ),
+            )
         return True
 
     def _record_result(
@@ -342,24 +367,71 @@ class JournalCoordinator:
             if row is not None:
                 self._record_state_event(executed_id, row["batch_id"], row["planned_operation_id"], state)
 
-    def mark_recovery_required(self) -> int:
+    def mark_recovery_required(
+        self,
+        *,
+        executed_operation_id: str | None = None,
+        batch_id: str | None = None,
+        plan_id: str | None = None,
+    ) -> int:
+        scopes = [value is not None for value in (executed_operation_id, batch_id, plan_id)]
+        if sum(scopes) != 1:
+            raise ValueError("mark_recovery_required requires exactly one execution, batch, or plan scope.")
         recoverable = tuple(state.value for state in self.state_machine.recoverable_states())
         placeholders = ",".join("?" for _ in recoverable)
+        where = f"result IN ({placeholders})"
+        params: list[str] = [*recoverable]
+        if executed_operation_id is not None:
+            where += " AND id = ?"
+            params.append(executed_operation_id)
+        elif batch_id is not None:
+            where += " AND batch_id = ?"
+            params.append(batch_id)
+        else:
+            where += " AND batch_id IN (SELECT id FROM operation_batch WHERE plan_id = ?)"
+            params.append(plan_id)
         with self.database.connection:
+            rows_to_mark = tuple(
+                self.database.connection.execute(
+                    f"SELECT id, batch_id, planned_operation_id FROM executed_operation WHERE {where}",
+                    tuple(params),
+                )
+            )
             cursor = self.database.connection.execute(
-                f"UPDATE executed_operation SET result = ? WHERE result IN ({placeholders})",
-                (JournalState.RECOVERY_REQUIRED.value, *recoverable),
+                f"UPDATE executed_operation SET result = ? WHERE {where}",
+                (JournalState.RECOVERY_REQUIRED.value, *params),
             )
-            for row in self.database.connection.execute(
-                "SELECT id, batch_id, planned_operation_id FROM executed_operation WHERE result = ?",
-                (JournalState.RECOVERY_REQUIRED.value,),
-            ):
+            for row in rows_to_mark:
                 self._record_state_event(row["id"], row["batch_id"], row["planned_operation_id"], JournalState.RECOVERY_REQUIRED)
-            self.database.connection.execute(
-                "UPDATE operation_batch SET status = ?, recovery_required = 1 WHERE id IN (SELECT DISTINCT batch_id FROM executed_operation WHERE result = ?)",
-                (JournalState.RECOVERY_REQUIRED.value, JournalState.RECOVERY_REQUIRED.value),
-            )
+            affected_batches = tuple({row["batch_id"] for row in rows_to_mark})
+            batch_placeholders = ",".join("?" for _ in affected_batches)
+            if affected_batches:
+                self.database.connection.execute(
+                    f"UPDATE operation_batch SET status = ?, recovery_required = 1, completed_at = NULL WHERE id IN ({batch_placeholders})",
+                    (JournalState.RECOVERY_REQUIRED.value, *affected_batches),
+                )
         return int(cursor.rowcount)
+
+    def mark_recovery_required_for_batch(self, batch_id: str) -> int:
+        return self.mark_recovery_required(batch_id=batch_id)
+
+    def mark_recovery_required_for_plan(self, plan_id: str) -> int:
+        return self.mark_recovery_required(plan_id=plan_id)
+
+    def mark_recovery_required_for_execution(self, executed_operation_id: str) -> int:
+        return self.mark_recovery_required(executed_operation_id=executed_operation_id)
+
+    def _raise_if_any_unresolved_real_work(self, current_plan_id: str) -> None:
+        unresolved = self.operations_requiring_recovery()
+        if unresolved:
+            raise JournalExecutionBlocked(
+                StructuredError(
+                    ErrorCode.RECOVERY_REQUIRED,
+                    Severity.RECOVERY,
+                    "FileFlow has unresolved real-operation journal work and must recover it before another real move batch starts.",
+                    {"plan_id": current_plan_id, "unresolved_count": len(unresolved)},
+                )
+            )
 
     def operations_requiring_recovery(self) -> tuple[sqlite3.Row, ...]:
         return tuple(

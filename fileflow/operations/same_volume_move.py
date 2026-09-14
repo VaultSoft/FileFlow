@@ -152,6 +152,11 @@ class SameVolumeMoveExecutor:
             return self._blocked(ErrorCode.SAFETY_BLOCK, "Only planned safe operations can be executed.", operation)
         if operation.destination_path is None:
             return self._blocked(ErrorCode.DESTINATION_UNSAFE, "Operation has no frozen destination.", operation)
+        source_state = self.occupancy.inspect(operation.source_path)
+        if source_state.status == OccupancyStatus.FREE:
+            return self._blocked(ErrorCode.SOURCE_MISSING, "Source path is no longer available.", operation)
+        if source_state.status == OccupancyStatus.UNKNOWN:
+            return MovePreflightResult(None, source_state.error)
 
         single_operation_plan = self._single_operation_plan(plan, operation)
         revalidation = PlanRevalidator(
@@ -173,12 +178,6 @@ class SameVolumeMoveExecutor:
                     {"operation_id": operation.id, "status": revalidation.status.value},
                 ),
             )
-
-        source_state = self.occupancy.inspect(operation.source_path)
-        if source_state.status == OccupancyStatus.FREE:
-            return self._blocked(ErrorCode.SOURCE_MISSING, "Source path is no longer available.", operation)
-        if source_state.status == OccupancyStatus.UNKNOWN:
-            return MovePreflightResult(None, source_state.error)
 
         source_identity = self._snapshot_required(operation.source_path, ErrorCode.SOURCE_IDENTITY_CHANGED, "Source identity could not be verified.")
         if source_identity.error:
@@ -276,6 +275,11 @@ class SameVolumeMoveExecutor:
 
     def _final_pre_move_check(self, preflight: MovePreflight) -> StructuredError | None:
         operation = preflight.operation
+        source_occupancy = self.occupancy.inspect(operation.source_path)
+        if source_occupancy.status == OccupancyStatus.FREE:
+            return StructuredError(ErrorCode.SOURCE_MISSING, Severity.OPERATION_BLOCKING, "Source path is no longer available.", {"operation_id": operation.id})
+        if source_occupancy.status == OccupancyStatus.UNKNOWN:
+            return source_occupancy.error
         source_chain = self.chain_safety.classify_chain(operation.source_path, preflight.plan.source_root_normalized)
         if not source_chain.allowed:
             return source_chain.error
@@ -387,6 +391,14 @@ class SameVolumeMoveRecoveryInspector:
         if destination_state.status == OccupancyStatus.UNKNOWN:
             return RecoveryInspection(RecoveryClassification.INSPECTION_BLOCKED, destination_state.error)
         if source.status == OccupancyStatus.OCCUPIED and destination_state.status == OccupancyStatus.FREE:
+            source_identity = self.identity_provider.snapshot(source_before)
+            if not source_identity.supported or source_identity.snapshot is None:
+                return RecoveryInspection(RecoveryClassification.INSPECTION_BLOCKED, source_identity.error)
+            if source_identity.snapshot.identity != expected_identity:
+                return RecoveryInspection(
+                    RecoveryClassification.CONFLICT_RECOVERY_REQUIRED,
+                    StructuredError(ErrorCode.RECOVERY_REQUIRED, Severity.RECOVERY, "Source identity does not match interrupted source.", {"source": source_before}),
+                )
             return RecoveryInspection(RecoveryClassification.LIKELY_NOT_MOVED)
         if source.status == OccupancyStatus.FREE and destination_state.status == OccupancyStatus.OCCUPIED:
             destination_identity = self.identity_provider.snapshot(destination)

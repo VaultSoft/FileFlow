@@ -17,6 +17,8 @@ from fileflow.models import (
     SafetyDecision,
     ScannedItem,
     ScannedItemKind,
+    Severity,
+    StructuredError,
     dataclass_to_jsonable,
 )
 from fileflow.operations.same_volume_move import (
@@ -30,7 +32,7 @@ from fileflow.operations.same_volume_move import (
 from fileflow.planner import PreviewPlanner
 from fileflow.preview_workflow import PreviewWorkflowService
 from fileflow.rules import default_categories, default_rules
-from fileflow.safety import CloudInfo, FakeIdentityProvider, FakeReparseInspector, PathChainSafety, WindowsPathPolicy
+from fileflow.safety import CloudInfo, FakeIdentityProvider, FakeReparseInspector, IdentityResult, PathChainSafety, WindowsFileIdentityProvider, WindowsPathPolicy
 from fileflow.storage import Database
 
 
@@ -71,6 +73,48 @@ class StaticOccupancy(DestinationOccupancyInspector):
 class SafeCloudClassifier:
     def classify(self, path: str, reparse_info=None):
         return CloudInfo(True)
+
+
+class FailingPathIdentityProvider:
+    def __init__(self, failing_paths):
+        self.inner = WindowsFileIdentityProvider()
+        self.failing_paths = {str(path).replace("/", "\\").casefold() for path in failing_paths}
+
+    def snapshot(self, logical_path: str) -> IdentityResult:
+        if str(logical_path).replace("/", "\\").casefold() in self.failing_paths:
+            return IdentityResult(
+                None,
+                StructuredError(
+                    ErrorCode.VERIFICATION_FAILED,
+                    Severity.RECOVERY,
+                    "Injected identity failure.",
+                    {"path": logical_path},
+                ),
+            )
+        return self.inner.snapshot(logical_path)
+
+
+class FailNthPathIdentityProvider:
+    def __init__(self, path, fail_on_call):
+        self.inner = WindowsFileIdentityProvider()
+        self.path = str(path).replace("/", "\\").casefold()
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def snapshot(self, logical_path: str) -> IdentityResult:
+        if str(logical_path).replace("/", "\\").casefold() == self.path:
+            self.calls += 1
+            if self.calls == self.fail_on_call:
+                return IdentityResult(
+                    None,
+                    StructuredError(
+                        ErrorCode.VERIFICATION_FAILED,
+                        Severity.RECOVERY,
+                        "Injected final identity failure.",
+                        {"path": logical_path},
+                    ),
+                )
+        return self.inner.snapshot(logical_path)
 
 
 def _error(code, message, path):
@@ -205,6 +249,26 @@ class SameVolumeMoveExecutorTests(unittest.TestCase):
                 db.close()
 
     @require_windows
+    def test_deleted_source_after_preview_reports_source_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan, operation = planned_file(root)
+            source = Path(operation.source_path)
+            source.unlink()
+
+            db, _, batch_id = execute_real(plan)
+            try:
+                row = db.connection.execute(
+                    "SELECT result, error_code FROM executed_operation WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()
+
+                self.assertEqual(JournalState.BLOCKED.value, row["result"])
+                self.assertEqual(ErrorCode.SOURCE_MISSING.value, row["error_code"])
+            finally:
+                db.close()
+
+    @require_windows
     def test_destination_that_appears_before_execution_is_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -330,6 +394,8 @@ class SameVolumeMoveExecutorTests(unittest.TestCase):
             outside = parent / "Outside"
             root.mkdir()
             outside.mkdir()
+            (outside / "Documents").mkdir()
+            (outside / "doc.pdf").write_text("outside", encoding="utf-8")
             plan, operation = planned_file(root)
 
             moved_root = parent / "OriginalRoot"
@@ -411,6 +477,124 @@ class SameVolumeMoveExecutorTests(unittest.TestCase):
                 db.close()
 
     @require_windows
+    def test_post_move_verification_failure_requires_recovery_and_stops_batch_after_reopen(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Root"
+            root.mkdir()
+            (root / "Documents").mkdir()
+            db_path = Path(tmp) / "fileflow.db"
+            first = root / "a.pdf"
+            second = root / "b.pdf"
+            first.write_text("a", encoding="utf-8")
+            second.write_text("b", encoding="utf-8")
+            plan = PreviewWorkflowService().analyse_folder(str(root)).plan
+            self.assertIsNotNone(plan)
+            plan = replace(plan, operations=tuple(sorted(plan.operations, key=lambda operation: operation.source_path)))
+            first_operation, second_operation = plan.operations
+            executor = SameVolumeMoveExecutor(identity_provider=FailingPathIdentityProvider({first_operation.destination_path}))
+            db = Database(db_path)
+            db.migrate()
+            coordinator = JournalCoordinator(db, executor)
+
+            batch_id = coordinator.execute_real_move_batch(plan)
+            row = db.connection.execute(
+                "SELECT result, error_code FROM executed_operation WHERE batch_id = ?",
+                (batch_id,),
+            ).fetchone()
+            batch = db.connection.execute("SELECT status, recovery_required FROM operation_batch WHERE id = ?", (batch_id,)).fetchone()
+            history = coordinator.operation_state_history(first_operation.id)
+            db.close()
+
+            self.assertFalse(Path(first_operation.source_path).exists())
+            self.assertTrue(Path(first_operation.destination_path).exists())
+            self.assertTrue(Path(second_operation.source_path).exists())
+            self.assertFalse(Path(second_operation.destination_path).exists())
+            self.assertEqual(JournalState.RECOVERY_REQUIRED.value, row["result"])
+            self.assertEqual(ErrorCode.VERIFICATION_FAILED.value, row["error_code"])
+            self.assertEqual(JournalState.RECOVERY_REQUIRED.value, batch["status"])
+            self.assertEqual(1, batch["recovery_required"])
+            self.assertEqual(
+                (
+                    JournalState.INTENT_RECORDED.value,
+                    JournalState.IN_PROGRESS.value,
+                    JournalState.VERIFYING.value,
+                    JournalState.RECOVERY_REQUIRED.value,
+                ),
+                history,
+            )
+
+            reopened = Database(db_path)
+            try:
+                reopened_coordinator = JournalCoordinator(reopened, SameVolumeMoveExecutor())
+                recovery_rows = reopened_coordinator.operations_requiring_recovery()
+                self.assertEqual(1, len(recovery_rows))
+                self.assertEqual(first_operation.id, recovery_rows[0]["planned_operation_id"])
+                with self.assertRaises(JournalExecutionBlocked):
+                    reopened_coordinator.execute_real_move_batch(plan)
+            finally:
+                reopened.close()
+
+    @require_windows
+    def test_final_destination_identity_snapshot_failure_requires_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan, operation = planned_file(root)
+            executor = SameVolumeMoveExecutor(
+                identity_provider=FailNthPathIdentityProvider(operation.destination_path, fail_on_call=2)
+            )
+
+            db, _, batch_id = execute_real(plan, executor)
+            try:
+                row = db.connection.execute(
+                    "SELECT result, error_code, identity_after_json FROM executed_operation WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()
+                batch = db.connection.execute("SELECT status, recovery_required FROM operation_batch WHERE id = ?", (batch_id,)).fetchone()
+
+                self.assertEqual(JournalState.RECOVERY_REQUIRED.value, row["result"])
+                self.assertEqual(ErrorCode.VERIFICATION_FAILED.value, row["error_code"])
+                self.assertIsNone(row["identity_after_json"])
+                self.assertEqual(JournalState.RECOVERY_REQUIRED.value, batch["status"])
+                self.assertEqual(1, batch["recovery_required"])
+            finally:
+                db.close()
+
+    @require_windows
+    def test_unresolved_real_work_blocks_different_plan_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan, _ = planned_file(root)
+            db = Database(":memory:")
+            db.migrate()
+            coordinator = JournalCoordinator(db, SameVolumeMoveExecutor())
+            coordinator.execute_real_move_batch(plan, stop_after=JournalState.INTENT_RECORDED)
+            different_plan = replace(plan, id="different-plan-id")
+
+            try:
+                with self.assertRaises(JournalExecutionBlocked):
+                    JournalCoordinator(db, SameVolumeMoveExecutor()).execute_real_move_batch(different_plan)
+            finally:
+                db.close()
+
+    @require_windows
+    def test_scoped_recovery_marking_does_not_overwrite_terminal_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan, _ = planned_file(root)
+            db, coordinator, batch_id = execute_real(plan)
+            try:
+                with self.assertRaises(ValueError):
+                    coordinator.mark_recovery_required()
+                self.assertEqual(0, coordinator.mark_recovery_required_for_batch(batch_id))
+                row = db.connection.execute(
+                    "SELECT result FROM executed_operation WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone()
+                self.assertEqual(JournalState.SUCCEEDED.value, row["result"])
+            finally:
+                db.close()
+
+    @require_windows
     def test_blocked_real_move_does_not_abort_unrelated_safe_move(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -463,6 +647,23 @@ class SameVolumeMoveExecutorTests(unittest.TestCase):
             self.assertEqual("SUCCEEDED", result.outcome.value)
             completed = inspector.inspect(operation.source_path, operation.destination_path, identity_json)
             self.assertEqual(RecoveryClassification.LIKELY_COMPLETED, completed.classification)
+
+    @require_windows
+    def test_recovery_case_a_replaced_source_is_not_likely_not_moved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan, operation = planned_file(root)
+            executor = SameVolumeMoveExecutor()
+            preflight = executor.prepare(plan, operation).preflight
+            self.assertIsNotNone(preflight)
+            identity_json = json.dumps(dataclass_to_jsonable(preflight.source_identity_before), sort_keys=True)
+            source = Path(operation.source_path)
+            source.unlink()
+            source.write_text("replacement", encoding="utf-8")
+
+            result = SameVolumeMoveRecoveryInspector().inspect(operation.source_path, operation.destination_path, identity_json)
+
+            self.assertEqual(RecoveryClassification.CONFLICT_RECOVERY_REQUIRED, result.classification)
 
     def test_cross_volume_identity_mismatch_is_blocked_before_rename(self):
         plan, executor = make_fake_plan(source_volume="VOL-A", destination_parent_volume="VOL-B")
