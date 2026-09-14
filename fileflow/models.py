@@ -23,7 +23,15 @@ class ErrorCode(str, Enum):
     DESTINATION_UNSAFE = "DESTINATION_UNSAFE"
     ROOT_UNSAFE = "ROOT_UNSAFE"
     RULE_CHANGED = "RULE_CHANGED"
+    CATEGORY_CHANGED = "CATEGORY_CHANGED"
     METADATA_CHANGED = "METADATA_CHANGED"
+    SOURCE_IDENTITY_CHANGED = "SOURCE_IDENTITY_CHANGED"
+    ROOT_IDENTITY_CHANGED = "ROOT_IDENTITY_CHANGED"
+    DESTINATION_APPEARED = "DESTINATION_APPEARED"
+    DESTINATION_COLLISION_CHANGED = "DESTINATION_COLLISION_CHANGED"
+    DESTINATION_REPARSE_CHANGED = "DESTINATION_REPARSE_CHANGED"
+    DESTINATION_PARENT_CHANGED = "DESTINATION_PARENT_CHANGED"
+    DESTINATION_PATH_POLICY_CHANGED = "DESTINATION_PATH_POLICY_CHANGED"
     CLOUD_PLACEHOLDER = "CLOUD_PLACEHOLDER"
     UNSUPPORTED = "UNSUPPORTED"
     INTERRUPTED = "INTERRUPTED"
@@ -86,6 +94,7 @@ class SafetyReason(str, Enum):
     DESTINATION_EXISTS = "DESTINATION_EXISTS"
     DIRECTORY_SKIPPED = "DIRECTORY_SKIPPED"
     NO_MATCHING_RULE = "NO_MATCHING_RULE"
+    SCAN_FAILED = "SCAN_FAILED"
 
 
 @dataclass(frozen=True)
@@ -188,6 +197,9 @@ class CategorySnapshot:
     name: str
     destination_folder: str
     extensions: tuple[str, ...]
+    enabled: bool
+    sort_order: int
+    is_builtin: bool
     version: int
 
     @classmethod
@@ -197,6 +209,9 @@ class CategorySnapshot:
             category.name,
             category.destination_folder,
             category.extensions,
+            category.enabled,
+            category.sort_order,
+            category.is_builtin,
             category.version,
         )
 
@@ -226,9 +241,17 @@ class RuleSnapshot:
     name: str
     category_id: str
     destination_folder: str
+    enabled: bool
     priority: int
     sort_order: int
     version: int
+    extensions: tuple[str, ...] = ()
+    filename_contains: str | None = None
+    filename_startswith: str | None = None
+    filename_endswith: str | None = None
+    min_size: int | None = None
+    max_size: int | None = None
+    source_subfolder: str | None = None
 
     @classmethod
     def from_rule(cls, rule: Rule) -> "RuleSnapshot":
@@ -237,9 +260,17 @@ class RuleSnapshot:
             rule.name,
             rule.category_id,
             rule.destination_folder,
+            rule.enabled,
             rule.priority,
             rule.sort_order,
             rule.version,
+            rule.extensions,
+            rule.filename_contains,
+            rule.filename_startswith,
+            rule.filename_endswith,
+            rule.min_size,
+            rule.max_size,
+            rule.source_subfolder,
         )
 
 
@@ -312,6 +343,7 @@ class PreviewPlan:
     source_root_normalized: str
     source_root_identity: IdentitySnapshot
     destination_root: str
+    destination_root_identity: IdentitySnapshot
     status: PlanStatus
     rule_set_version: int
     category_version: int
@@ -351,9 +383,38 @@ class ExecutionResult:
 
 @dataclass(frozen=True)
 class RevalidationResult:
-    valid: bool
-    reasons: tuple[SafetyReason, ...] = ()
+    status: "RevalidationStatus"
+    reasons: tuple["RevalidationReason", ...] = ()
     errors: tuple[StructuredError, ...] = ()
+
+    @property
+    def valid(self) -> bool:
+        return self.status == RevalidationStatus.VALID
+
+
+class RevalidationStatus(str, Enum):
+    VALID = "VALID"
+    STALE = "STALE"
+    BLOCKED = "BLOCKED"
+
+
+class RevalidationReason(str, Enum):
+    SOURCE_MISSING = "SOURCE_MISSING"
+    SOURCE_IDENTITY_CHANGED = "SOURCE_IDENTITY_CHANGED"
+    ROOT_IDENTITY_CHANGED = "ROOT_IDENTITY_CHANGED"
+    DESTINATION_ROOT_IDENTITY_CHANGED = "DESTINATION_ROOT_IDENTITY_CHANGED"
+    RULE_SNAPSHOT_CHANGED = "RULE_SNAPSHOT_CHANGED"
+    CATEGORY_SNAPSHOT_CHANGED = "CATEGORY_SNAPSHOT_CHANGED"
+    DESTINATION_APPEARED = "DESTINATION_APPEARED"
+    DESTINATION_COLLISION_CHANGED = "DESTINATION_COLLISION_CHANGED"
+    DESTINATION_REPARSE_CHANGED = "DESTINATION_REPARSE_CHANGED"
+    DESTINATION_OUTSIDE_ROOT = "DESTINATION_OUTSIDE_ROOT"
+    DESTINATION_PATH_POLICY_CHANGED = "DESTINATION_PATH_POLICY_CHANGED"
+    DESTINATION_PARENT_CHANGED = "DESTINATION_PARENT_CHANGED"
+    SAFETY_CLASSIFICATION_CHANGED = "SAFETY_CLASSIFICATION_CHANGED"
+    CLOUD_CLASSIFICATION_CHANGED = "CLOUD_CLASSIFICATION_CHANGED"
+    REPARSE_STATE_CHANGED = "REPARSE_STATE_CHANGED"
+    SAFETY_POLICY_CHANGED = "SAFETY_POLICY_CHANGED"
 
 
 def dataclass_to_jsonable(value: Any) -> Any:

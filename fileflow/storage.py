@@ -5,7 +5,24 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import PlannedOperation, PreviewPlan, StructuredError, dataclass_to_jsonable
+from .models import (
+    CategorySnapshot,
+    ConflictStatus,
+    ErrorCode,
+    FileIdentity,
+    IdentitySnapshot,
+    JournalState,
+    MetadataSnapshot,
+    OperationIntent,
+    PlanStatus,
+    PlannedOperation,
+    PlannedOperationStatus,
+    PreviewPlan,
+    RuleSnapshot,
+    Severity,
+    StructuredError,
+    dataclass_to_jsonable,
+)
 
 
 MIGRATIONS: tuple[tuple[int, str, str], ...] = (
@@ -30,7 +47,8 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             safety_policy_version INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             approved_at TEXT,
-            summary_json TEXT NOT NULL
+            summary_json TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS planned_operation (
             id TEXT PRIMARY KEY,
@@ -47,7 +65,8 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             reversible INTEGER NOT NULL,
             metadata_json TEXT NOT NULL,
             identity_json TEXT NOT NULL,
-            preview_index INTEGER NOT NULL
+            preview_index INTEGER NOT NULL,
+            operation_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS operation_batch (
             id TEXT PRIMARY KEY,
@@ -80,6 +99,13 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
             started_at TEXT NOT NULL,
             completed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS operation_state_event (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            planned_operation_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS error_event (
             id TEXT PRIMARY KEY,
             scope TEXT NOT NULL,
@@ -94,6 +120,7 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         CREATE INDEX IF NOT EXISTS idx_planned_operation_plan_index ON planned_operation(plan_id, preview_index);
         CREATE INDEX IF NOT EXISTS idx_planned_operation_status ON planned_operation(plan_id, safety_status);
         CREATE INDEX IF NOT EXISTS idx_executed_operation_batch_result ON executed_operation(batch_id, result);
+        CREATE INDEX IF NOT EXISTS idx_operation_state_event_operation ON operation_state_event(planned_operation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_error_event_scope ON error_event(scope, scope_id);
         """,
     ),
@@ -140,8 +167,8 @@ class PlanRepository:
                 INSERT INTO preview_plan(
                     id, profile_id, source_root, source_root_normalized, source_root_identity_json,
                     destination_root, status, rule_set_version, category_version, safety_policy_version,
-                    created_at, approved_at, summary_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, approved_at, summary_json, snapshot_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.id,
@@ -157,6 +184,7 @@ class PlanRepository:
                     plan.created_at,
                     None,
                     json.dumps(summary, sort_keys=True),
+                    json.dumps(dataclass_to_jsonable(plan), sort_keys=True),
                 ),
             )
             for operation in plan.operations:
@@ -172,8 +200,8 @@ class PlanRepository:
             INSERT INTO planned_operation(
                 id, plan_id, operation_type, source_path, destination_path, source_root,
                 rule_id, category_id, reason, safety_status, conflict_status, reversible,
-                metadata_json, identity_json, preview_index
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                metadata_json, identity_json, preview_index, operation_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 operation.id,
@@ -191,8 +219,18 @@ class PlanRepository:
                 metadata_json,
                 identity_json,
                 operation.preview_index,
+                json.dumps(dataclass_to_jsonable(operation), sort_keys=True),
             ),
         )
+
+    def load_plan(self, plan_id: str) -> PreviewPlan | None:
+        row = self.database.connection.execute(
+            "SELECT snapshot_json FROM preview_plan WHERE id = ?",
+            (plan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _preview_plan_from_json(json.loads(row["snapshot_json"]))
 
     def plan_count(self) -> int:
         row = self.database.connection.execute("SELECT COUNT(*) AS count FROM preview_plan").fetchone()
@@ -225,3 +263,120 @@ class ErrorRepository:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+
+def _structured_error_from_json(payload: dict | None) -> StructuredError | None:
+    if payload is None:
+        return None
+    return StructuredError(
+        ErrorCode(payload["code"]),
+        Severity(payload["severity"]),
+        payload["message"],
+        payload.get("details", {}),
+    )
+
+
+def _file_identity_from_json(payload: dict) -> FileIdentity:
+    return FileIdentity(
+        volume_id=payload["volume_id"],
+        file_id=payload["file_id"],
+        file_type=payload["file_type"],
+        link_count=payload.get("link_count"),
+    )
+
+
+def _metadata_snapshot_from_json(payload: dict) -> MetadataSnapshot:
+    return MetadataSnapshot(
+        logical_path=payload["logical_path"],
+        size=int(payload["size"]),
+        mtime_ns=int(payload["mtime_ns"]),
+        ctime_ns=int(payload["ctime_ns"]),
+        attributes=payload.get("attributes"),
+        reparse_tag=payload.get("reparse_tag"),
+        reparse_kind=payload.get("reparse_kind"),
+    )
+
+
+def _identity_snapshot_from_json(payload: dict | None) -> IdentitySnapshot | None:
+    if payload is None:
+        return None
+    return IdentitySnapshot(
+        identity=_file_identity_from_json(payload["identity"]),
+        metadata=_metadata_snapshot_from_json(payload["metadata"]),
+    )
+
+
+def _rule_snapshot_from_json(payload: dict | None) -> RuleSnapshot | None:
+    if payload is None:
+        return None
+    return RuleSnapshot(
+        id=payload["id"],
+        name=payload["name"],
+        category_id=payload["category_id"],
+        destination_folder=payload["destination_folder"],
+        enabled=bool(payload["enabled"]),
+        priority=int(payload["priority"]),
+        sort_order=int(payload["sort_order"]),
+        version=int(payload["version"]),
+        extensions=tuple(payload.get("extensions", ())),
+        filename_contains=payload.get("filename_contains"),
+        filename_startswith=payload.get("filename_startswith"),
+        filename_endswith=payload.get("filename_endswith"),
+        min_size=payload.get("min_size"),
+        max_size=payload.get("max_size"),
+        source_subfolder=payload.get("source_subfolder"),
+    )
+
+
+def _category_snapshot_from_json(payload: dict | None) -> CategorySnapshot | None:
+    if payload is None:
+        return None
+    return CategorySnapshot(
+        id=payload["id"],
+        name=payload["name"],
+        destination_folder=payload["destination_folder"],
+        extensions=tuple(payload.get("extensions", ())),
+        enabled=bool(payload["enabled"]),
+        sort_order=int(payload["sort_order"]),
+        is_builtin=bool(payload["is_builtin"]),
+        version=int(payload["version"]),
+    )
+
+
+def _planned_operation_from_json(payload: dict) -> PlannedOperation:
+    return PlannedOperation(
+        id=payload["id"],
+        operation_type=OperationIntent(payload["operation_type"]),
+        source_path=payload["source_path"],
+        destination_path=payload.get("destination_path"),
+        source_root=payload["source_root"],
+        rule_snapshot=_rule_snapshot_from_json(payload.get("rule_snapshot")),
+        category_snapshot=_category_snapshot_from_json(payload.get("category_snapshot")),
+        reason=payload["reason"],
+        safety_status=PlannedOperationStatus(payload["safety_status"]),
+        conflict_status=ConflictStatus(payload["conflict_status"]),
+        reversible=bool(payload["reversible"]),
+        source_identity=_identity_snapshot_from_json(payload.get("source_identity")),
+        preview_index=int(payload["preview_index"]),
+        structured_error=_structured_error_from_json(payload.get("structured_error")),
+    )
+
+
+def _preview_plan_from_json(payload: dict) -> PreviewPlan:
+    return PreviewPlan(
+        id=payload["id"],
+        profile_id=payload["profile_id"],
+        source_root=payload["source_root"],
+        source_root_normalized=payload["source_root_normalized"],
+        source_root_identity=_identity_snapshot_from_json(payload["source_root_identity"]),
+        destination_root=payload["destination_root"],
+        destination_root_identity=_identity_snapshot_from_json(payload["destination_root_identity"]),
+        status=PlanStatus(payload["status"]),
+        rule_set_version=int(payload["rule_set_version"]),
+        category_version=int(payload["category_version"]),
+        safety_policy_version=int(payload["safety_policy_version"]),
+        operations=tuple(_planned_operation_from_json(operation) for operation in payload.get("operations", ())),
+        rule_snapshots=tuple(_rule_snapshot_from_json(rule) for rule in payload.get("rule_snapshots", ())),
+        category_snapshots=tuple(_category_snapshot_from_json(category) for category in payload.get("category_snapshots", ())),
+        created_at=payload["created_at"],
+    )

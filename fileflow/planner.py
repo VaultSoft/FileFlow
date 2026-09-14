@@ -11,21 +11,26 @@ from .models import (
     Category,
     CategorySnapshot,
     ConflictStatus,
+    ErrorCode,
     IdentitySnapshot,
     OperationIntent,
     PlanStatus,
     PlannedOperation,
     PlannedOperationStatus,
     PreviewPlan,
+    RevalidationReason,
+    RevalidationStatus,
     Rule,
     RuleSnapshot,
     SafetyDecision,
     SafetyReason,
+    Severity,
     ScannedItem,
     ScannedItemKind,
+    StructuredError,
 )
 from .rules import RuleEngine
-from .safety import FileIdentityProvider, PathChainSafety, WindowsPathPolicy
+from .safety import CloudClassifier, FileIdentityProvider, PathChainSafety, WindowsPathPolicy
 
 
 class PreviewPlanner:
@@ -60,6 +65,9 @@ class PreviewPlanner:
         root_identity = self.identity_provider.snapshot(root_decision.normalized_path)
         if not root_identity.supported or root_identity.snapshot is None:
             raise ValueError("Source root identity is required.")
+        destination_root_identity = self.identity_provider.snapshot(destination_decision.normalized_path)
+        if not destination_root_identity.supported or destination_root_identity.snapshot is None:
+            raise ValueError("Destination root identity is required.")
 
         category_by_id = {category.id: category for category in categories if category.enabled}
         engine = RuleEngine(rules)
@@ -178,6 +186,7 @@ class PreviewPlanner:
             source_root_normalized=root_decision.normalized_path,
             source_root_identity=root_identity.snapshot,
             destination_root=destination_decision.normalized_path,
+            destination_root_identity=destination_root_identity.snapshot,
             status=status,
             rule_set_version=rule_set_version,
             category_version=category_version,
@@ -244,45 +253,202 @@ class PlanRevalidator:
         path_policy: WindowsPathPolicy,
         chain_safety: PathChainSafety,
         identity_provider: FileIdentityProvider,
+        cloud_classifier: CloudClassifier | None = None,
     ):
         self.path_policy = path_policy
         self.chain_safety = chain_safety
         self.identity_provider = identity_provider
+        self.cloud_classifier = cloud_classifier
 
     def revalidate(
         self,
         plan: PreviewPlan,
         current_rules: tuple[Rule, ...],
         current_categories: tuple[Category, ...],
+        existing_destination_paths: tuple[str, ...] = (),
     ):
         from .models import RevalidationResult
 
-        reasons: list[SafetyReason] = []
-        errors = []
+        stale_reasons: list[RevalidationReason] = []
+        blocked_reasons: list[RevalidationReason] = []
+        errors: list[StructuredError] = []
         if tuple(RuleSnapshot.from_rule(rule) for rule in current_rules) != plan.rule_snapshots:
-            reasons.append(SafetyReason.SOURCE_MISSING)
+            stale_reasons.append(RevalidationReason.RULE_SNAPSHOT_CHANGED)
+            errors.append(
+                StructuredError(
+                    ErrorCode.RULE_CHANGED,
+                    Severity.BLOCKING,
+                    "Rule snapshot changed after preview.",
+                    {"plan_id": plan.id},
+                )
+            )
         if tuple(CategorySnapshot.from_category(category) for category in current_categories) != plan.category_snapshots:
-            reasons.append(SafetyReason.NO_MATCHING_RULE)
+            stale_reasons.append(RevalidationReason.CATEGORY_SNAPSHOT_CHANGED)
+            errors.append(
+                StructuredError(
+                    ErrorCode.CATEGORY_CHANGED,
+                    Severity.BLOCKING,
+                    "Category snapshot changed after preview.",
+                    {"plan_id": plan.id},
+                )
+            )
+        if plan.safety_policy_version != SAFETY_POLICY_VERSION:
+            stale_reasons.append(RevalidationReason.SAFETY_POLICY_CHANGED)
+            errors.append(
+                StructuredError(
+                    ErrorCode.STALE_PLAN,
+                    Severity.BLOCKING,
+                    "Safety policy version changed after preview.",
+                    {"preview": plan.safety_policy_version, "current": SAFETY_POLICY_VERSION},
+                )
+            )
         root_chain = self.chain_safety.classify_chain(plan.source_root_normalized)
         if not root_chain.allowed:
-            reasons.append(root_chain.reason)
+            blocked_reasons.append(RevalidationReason.REPARSE_STATE_CHANGED)
             if root_chain.error:
                 errors.append(root_chain.error)
         root_identity = self.identity_provider.snapshot(plan.source_root_normalized)
         if not root_identity.supported or root_identity.snapshot != plan.source_root_identity:
-            reasons.append(SafetyReason.IDENTITY_UNAVAILABLE)
+            stale_reasons.append(RevalidationReason.ROOT_IDENTITY_CHANGED)
             if root_identity.error:
                 errors.append(root_identity.error)
+            else:
+                errors.append(
+                    StructuredError(
+                        ErrorCode.ROOT_IDENTITY_CHANGED,
+                        Severity.BLOCKING,
+                        "Source root identity changed after preview.",
+                        {"path": plan.source_root_normalized},
+                    )
+                )
+        destination_root_chain = self.chain_safety.classify_chain(plan.destination_root)
+        if not destination_root_chain.allowed:
+            blocked_reasons.append(RevalidationReason.DESTINATION_PARENT_CHANGED)
+            if destination_root_chain.error:
+                errors.append(destination_root_chain.error)
+        destination_root_identity = self.identity_provider.snapshot(plan.destination_root)
+        if not destination_root_identity.supported or destination_root_identity.snapshot != plan.destination_root_identity:
+            stale_reasons.append(RevalidationReason.DESTINATION_ROOT_IDENTITY_CHANGED)
+            if destination_root_identity.error:
+                errors.append(destination_root_identity.error)
+            else:
+                errors.append(
+                    StructuredError(
+                        ErrorCode.ROOT_IDENTITY_CHANGED,
+                        Severity.BLOCKING,
+                        "Destination root identity changed after preview.",
+                        {"path": plan.destination_root},
+                    )
+                )
         for operation in plan.operations:
             source_chain = self.chain_safety.classify_chain(operation.source_path, plan.source_root_normalized)
             if not source_chain.allowed:
-                reasons.append(source_chain.reason)
+                blocked_reasons.append(RevalidationReason.REPARSE_STATE_CHANGED)
                 if source_chain.error:
                     errors.append(source_chain.error)
             if operation.source_identity is not None:
                 identity = self.identity_provider.snapshot(operation.source_path)
                 if not identity.supported or identity.snapshot != operation.source_identity:
-                    reasons.append(SafetyReason.IDENTITY_UNAVAILABLE)
+                    stale_reasons.append(RevalidationReason.SOURCE_IDENTITY_CHANGED)
                     if identity.error:
                         errors.append(identity.error)
-        return RevalidationResult(valid=not reasons, reasons=tuple(reasons), errors=tuple(errors))
+                    else:
+                        errors.append(
+                            StructuredError(
+                                ErrorCode.SOURCE_IDENTITY_CHANGED,
+                                Severity.OPERATION_BLOCKING,
+                                "Source identity changed after preview.",
+                                {"path": operation.source_path, "operation_id": operation.id},
+                            )
+                        )
+            if self.cloud_classifier is not None:
+                cloud = self.cloud_classifier.classify(operation.source_path)
+                if not cloud.safe:
+                    blocked_reasons.append(RevalidationReason.CLOUD_CLASSIFICATION_CHANGED)
+                    if cloud.error:
+                        errors.append(cloud.error)
+            self._revalidate_destination(
+                plan,
+                operation,
+                existing_destination_paths,
+                stale_reasons,
+                blocked_reasons,
+                errors,
+            )
+        if blocked_reasons:
+            return RevalidationResult(RevalidationStatus.BLOCKED, tuple(dict.fromkeys(blocked_reasons + stale_reasons)), tuple(errors))
+        if stale_reasons:
+            return RevalidationResult(RevalidationStatus.STALE, tuple(dict.fromkeys(stale_reasons)), tuple(errors))
+        return RevalidationResult(RevalidationStatus.VALID)
+
+    def _revalidate_destination(
+        self,
+        plan: PreviewPlan,
+        operation: PlannedOperation,
+        existing_destination_paths: tuple[str, ...],
+        stale_reasons: list[RevalidationReason],
+        blocked_reasons: list[RevalidationReason],
+        errors: list[StructuredError],
+    ) -> None:
+        if operation.destination_path is None:
+            return
+        destination_policy = self.path_policy.classify(operation.destination_path, plan.destination_root)
+        if not destination_policy.allowed or destination_policy.normalized_path is None:
+            reason = (
+                RevalidationReason.DESTINATION_OUTSIDE_ROOT
+                if destination_policy.reason == SafetyReason.PATH_ESCAPE
+                else RevalidationReason.DESTINATION_PATH_POLICY_CHANGED
+            )
+            blocked_reasons.append(reason)
+            errors.append(
+                destination_policy.error
+                or StructuredError(
+                    ErrorCode.DESTINATION_PATH_POLICY_CHANGED,
+                    Severity.OPERATION_BLOCKING,
+                    "Planned destination is no longer supported by path policy.",
+                    {"destination": operation.destination_path, "operation_id": operation.id},
+                )
+            )
+            return
+
+        destination_parent = ntpath.dirname(destination_policy.normalized_path)
+        parent_chain = self.chain_safety.classify_chain(destination_parent, plan.destination_root)
+        if not parent_chain.allowed:
+            blocked_reasons.append(RevalidationReason.DESTINATION_PARENT_CHANGED)
+            errors.append(
+                parent_chain.error
+                or StructuredError(
+                    ErrorCode.DESTINATION_PARENT_CHANGED,
+                    Severity.OPERATION_BLOCKING,
+                    "Planned destination parent became unsafe.",
+                    {"destination": destination_policy.normalized_path, "operation_id": operation.id},
+                )
+            )
+            return
+
+        if Path(destination_policy.normalized_path).exists():
+            stale_reasons.append(RevalidationReason.DESTINATION_APPEARED)
+            errors.append(
+                StructuredError(
+                    ErrorCode.DESTINATION_APPEARED,
+                    Severity.OPERATION_BLOCKING,
+                    "Planned destination appeared after preview.",
+                    {"destination": destination_policy.normalized_path, "operation_id": operation.id},
+                )
+            )
+            destination_chain = self.chain_safety.classify_chain(destination_policy.normalized_path, plan.destination_root)
+            if not destination_chain.allowed:
+                blocked_reasons.append(RevalidationReason.DESTINATION_REPARSE_CHANGED)
+                if destination_chain.error:
+                    errors.append(destination_chain.error)
+
+        if self.path_policy.has_case_collision(destination_policy.normalized_path, list(existing_destination_paths)):
+            stale_reasons.append(RevalidationReason.DESTINATION_COLLISION_CHANGED)
+            errors.append(
+                StructuredError(
+                    ErrorCode.DESTINATION_COLLISION_CHANGED,
+                    Severity.OPERATION_BLOCKING,
+                    "A case-equivalent destination collision appeared after preview.",
+                    {"destination": destination_policy.normalized_path, "operation_id": operation.id},
+                )
+            )

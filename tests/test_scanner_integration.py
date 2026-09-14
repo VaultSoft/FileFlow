@@ -46,6 +46,22 @@ class ScannerIntegrationTests(unittest.TestCase):
             self.assertEqual(ScannedItemKind.DIRECTORY, paths["Nested"].kind)
             self.assertEqual(SafetyReason.DIRECTORY_SKIPPED, paths["Nested"].safety.reason)
 
+    def test_missing_root_enumeration_becomes_structured_scan_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "missing"
+            policy = WindowsPathPolicy()
+            root_normalized = policy.normalize(str(missing))
+            scanner = ImmediateChildScanner(
+                policy,
+                PathChainSafety(policy, FakeReparseInspector()),
+                FakeIdentityProvider({root_normalized: snapshot(root_normalized, "root", "directory")}),
+                ConservativeCloudClassifier(),
+            )
+            items = scanner.scan(str(missing))
+            self.assertEqual(1, len(items))
+            self.assertEqual(SafetyReason.SCAN_FAILED, items[0].safety.reason)
+            self.assertIsNotNone(items[0].safety.error)
+
 
 if __name__ == "__main__":
     unittest.main()

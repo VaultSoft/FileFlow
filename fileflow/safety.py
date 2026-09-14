@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from ctypes import wintypes
 import ntpath
 import os
 import re
@@ -348,7 +349,25 @@ class WindowsFileIdentityProvider:
     OPEN_EXISTING = 3
     FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
-    INVALID_HANDLE_VALUE = -1
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    def _kernel32(self):
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION)]
+        kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        return kernel32
 
     def snapshot(self, logical_path: str) -> IdentityResult:
         if sys.platform != "win32":
@@ -361,10 +380,10 @@ class WindowsFileIdentityProvider:
                     {"path": logical_path},
                 ),
             )
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = self._kernel32()
         flags = self.FILE_FLAG_BACKUP_SEMANTICS | self.FILE_FLAG_OPEN_REPARSE_POINT
         handle = kernel32.CreateFileW(
-            ctypes.c_wchar_p(logical_path),
+            logical_path,
             self.GENERIC_METADATA_ACCESS,
             self.SHARE_READ | self.SHARE_WRITE | self.SHARE_DELETE,
             None,
@@ -372,7 +391,7 @@ class WindowsFileIdentityProvider:
             flags,
             None,
         )
-        if handle == self.INVALID_HANDLE_VALUE:
+        if int(handle) == int(self.INVALID_HANDLE_VALUE):
             return self._error(logical_path, "Could not open path for identity inspection.")
         try:
             info = _BY_HANDLE_FILE_INFORMATION()

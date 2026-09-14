@@ -3,11 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import (
+    ErrorCode,
     ScannedItem,
     ScannedItemKind,
     SafetyDecision,
     SafetyReason,
     SafetyStatus,
+    Severity,
+    StructuredError,
 )
 from .safety import CloudClassifier, FileIdentityProvider, PathChainSafety, WindowsPathPolicy
 
@@ -38,14 +41,71 @@ class ImmediateChildScanner:
             )
 
         items: list[ScannedItem] = []
-        for child in Path(root_decision.normalized_path).iterdir():
+        try:
+            children = tuple(Path(root_decision.normalized_path).iterdir())
+        except OSError as exc:
+            return (
+                ScannedItem(
+                    path=root_decision.normalized_path,
+                    relative_path=".",
+                    kind=ScannedItemKind.DIRECTORY,
+                    safety=SafetyDecision.unsupported(
+                        SafetyReason.SCAN_FAILED,
+                        "Could not enumerate selected root.",
+                        normalized_path=root_decision.normalized_path,
+                        code=ErrorCode.ACCESS_DENIED,
+                        details={"path": root_decision.normalized_path, "error": str(exc)},
+                    ),
+                ),
+            )
+        for child in children:
             child_path = str(child)
-            child_decision = self.chain_safety.classify_chain(child_path, root_decision.normalized_path)
-            relative_path = self.path_policy.relative_to_root(child_path, root_decision.normalized_path)
+            try:
+                child_decision = self.chain_safety.classify_chain(child_path, root_decision.normalized_path)
+                relative_path = self.path_policy.relative_to_root(child_path, root_decision.normalized_path)
+            except Exception as exc:
+                items.append(
+                    ScannedItem(
+                        child_path,
+                        ".",
+                        ScannedItemKind.FILE,
+                        SafetyDecision(
+                            SafetyStatus.UNSUPPORTED,
+                            SafetyReason.SCAN_FAILED,
+                            None,
+                            StructuredError(
+                                ErrorCode.UNKNOWN_IO_ERROR,
+                                Severity.OPERATION_BLOCKING,
+                                "Could not classify child path.",
+                                {"path": child_path, "error": str(exc)},
+                            ),
+                        ),
+                    )
+                )
+                continue
             if not child_decision.allowed:
                 items.append(ScannedItem(child_path, relative_path, ScannedItemKind.FILE, child_decision))
                 continue
-            if child.is_dir():
+            try:
+                is_dir = child.is_dir()
+                is_file = child.is_file()
+            except OSError as exc:
+                items.append(
+                    ScannedItem(
+                        child_path,
+                        relative_path,
+                        ScannedItemKind.FILE,
+                        SafetyDecision.unsupported(
+                            SafetyReason.SCAN_FAILED,
+                            "Could not classify filesystem entry type.",
+                            normalized_path=child_decision.normalized_path,
+                            code=ErrorCode.UNKNOWN_IO_ERROR,
+                            details={"path": child_path, "error": str(exc)},
+                        ),
+                    )
+                )
+                continue
+            if is_dir:
                 items.append(
                     ScannedItem(
                         child_path,
@@ -59,7 +119,7 @@ class ImmediateChildScanner:
                     )
                 )
                 continue
-            if not child.is_file():
+            if not is_file:
                 items.append(
                     ScannedItem(
                         child_path,
