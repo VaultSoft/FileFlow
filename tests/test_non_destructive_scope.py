@@ -4,8 +4,9 @@ from pathlib import Path
 
 
 class NonDestructiveScopeTests(unittest.TestCase):
-    def test_runtime_source_contains_no_file_mutation_primitives(self):
+    def test_runtime_source_contains_only_approved_move_primitive(self):
         root = Path(__file__).resolve().parents[1] / "fileflow"
+        approved_real_mutation = root / "operations" / "same_volume_move.py"
         prohibited_calls = {
             ("shutil", "move"),
             ("shutil", "copy"),
@@ -32,6 +33,8 @@ class NonDestructiveScopeTests(unittest.TestCase):
                     if isinstance(node.func.value, ast.Name):
                         owner = node.func.value.id
                     if (owner, node.func.attr) in prohibited_calls:
+                        if source == approved_real_mutation and (owner, node.func.attr) == ("os", "rename"):
+                            continue
                         self.fail(f"Prohibited file mutation call in {source}: {owner}.{node.func.attr}")
             for api_name in ("MoveFile", "MoveFileEx", "CopyFile", "DeleteFile", "RemoveDirectory", "CreateDirectory"):
                 if api_name in text:

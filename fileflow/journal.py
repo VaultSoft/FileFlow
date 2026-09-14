@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 import sqlite3
 from dataclasses import dataclass
@@ -17,7 +18,9 @@ from .models import (
     PreviewPlan,
     Severity,
     StructuredError,
+    dataclass_to_jsonable,
 )
+from .operations.same_volume_move import SameVolumeMoveExecutor
 from .storage import Database
 
 
@@ -108,6 +111,35 @@ class JournalCoordinator:
                 return batch_id
         return batch_id
 
+    def execute_real_move_batch(self, plan: PreviewPlan, stop_after: JournalState | None = None) -> str:
+        self._raise_if_plan_has_unresolved_work(plan.id)
+        if not isinstance(self.executor, SameVolumeMoveExecutor):
+            raise TypeError("execute_real_move_batch requires SameVolumeMoveExecutor.")
+        batch_id = str(uuid.uuid4())
+        approved_at = datetime.now(timezone.utc).isoformat()
+        with self.database.connection:
+            self.database.connection.execute(
+                """
+                INSERT INTO operation_batch(
+                    id, plan_id, profile_id, status, approved_at, app_version, summary_json, recovery_required
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (batch_id, plan.id, plan.profile_id, JournalState.APPROVED.value, approved_at, APP_VERSION, "{}"),
+            )
+        self._mark_batch_started(batch_id)
+        for operation in plan.operations:
+            completed = self._execute_real_move_one(batch_id, plan, operation, stop_after=stop_after)
+            self._refresh_batch_status(batch_id)
+            if not completed:
+                return batch_id
+            row = self.database.connection.execute(
+                "SELECT result FROM executed_operation WHERE batch_id = ? AND planned_operation_id = ? ORDER BY started_at DESC LIMIT 1",
+                (batch_id, operation.id),
+            ).fetchone()
+            if row is not None and row["result"] in (JournalState.INTERRUPTED.value, JournalState.RECOVERY_REQUIRED.value):
+                return batch_id
+        return batch_id
+
     def _execute_one(self, batch_id: str, operation: PlannedOperation, stop_after: JournalState | None = None) -> bool:
         started_at = datetime.now(timezone.utc).isoformat()
         if operation.safety_status != PlannedOperationStatus.PLANNED:
@@ -170,6 +202,80 @@ class JournalCoordinator:
             self._update_execution(executed_id, state, result.error)
         return True
 
+    def _execute_real_move_one(self, batch_id: str, plan: PreviewPlan, operation: PlannedOperation, stop_after: JournalState | None = None) -> bool:
+        started_at = datetime.now(timezone.utc).isoformat()
+        executor: SameVolumeMoveExecutor = self.executor
+        preflight_result = executor.prepare(plan, operation)
+        if not preflight_result.allowed or preflight_result.preflight is None:
+            self._record_result(batch_id, operation, JournalState.BLOCKED, preflight_result.error, started_at)
+            return True
+
+        preflight = preflight_result.preflight
+        state = self.state_machine.transition(JournalState.APPROVED, JournalState.INTENT_RECORDED)
+        with self.database.connection:
+            executed_id = str(uuid.uuid4())
+            self.database.connection.execute(
+                """
+                INSERT INTO executed_operation(
+                    id, batch_id, planned_operation_id, operation_type, source_before, destination,
+                    result, error_code, error_detail, metadata_before_json, metadata_after_json,
+                    identity_before_json, identity_after_json, undo_eligible, undo_status, started_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    executed_id,
+                    batch_id,
+                    operation.id,
+                    operation.operation_type.value,
+                    operation.source_path,
+                    operation.destination_path,
+                    state.value,
+                    None,
+                    None,
+                    json.dumps(dataclass_to_jsonable(preflight.source_identity_before.metadata), sort_keys=True),
+                    None,
+                    json.dumps(dataclass_to_jsonable(preflight.source_identity_before), sort_keys=True),
+                    None,
+                    0,
+                    "UNDO_BLOCKED",
+                    started_at,
+                    None,
+                ),
+            )
+            self._record_state_event(executed_id, batch_id, operation.id, state)
+        if stop_after == state:
+            return False
+
+        state = self.state_machine.transition(state, JournalState.IN_PROGRESS)
+        self._update_execution(executed_id, state, None)
+        if stop_after == state:
+            return False
+
+        move_result = executor.move(preflight)
+        if move_result.outcome == ExecutionOutcome.INTERRUPTED:
+            state = self.state_machine.transition(state, JournalState.INTERRUPTED)
+            self._update_execution(executed_id, state, move_result.error)
+            return True
+        if move_result.outcome != ExecutionOutcome.SUCCEEDED:
+            state = self.state_machine.transition(state, JournalState.FAILED)
+            self._update_execution(executed_id, state, move_result.error)
+            return True
+
+        state = self.state_machine.transition(state, JournalState.VERIFYING)
+        self._update_execution(executed_id, state, None)
+        if stop_after == state:
+            return False
+
+        verification = executor.verify(preflight)
+        if verification.outcome == ExecutionOutcome.SUCCEEDED:
+            identity_after = executor.identity_provider.snapshot(operation.destination_path)
+            state = self.state_machine.transition(state, JournalState.SUCCEEDED)
+            self._update_execution(executed_id, state, None, identity_after.snapshot if identity_after.supported else None)
+        else:
+            state = self.state_machine.transition(state, JournalState.FAILED)
+            self._update_execution(executed_id, state, verification.error)
+        return True
+
     def _record_result(
         self,
         batch_id: str,
@@ -210,13 +316,14 @@ class JournalCoordinator:
             )
             self._record_state_event(executed_id, batch_id, operation.id, state)
 
-    def _update_execution(self, executed_id: str, state: JournalState, error: StructuredError | None) -> None:
+    def _update_execution(self, executed_id: str, state: JournalState, error: StructuredError | None, identity_after=None) -> None:
         completed_at = None if state in self.state_machine.recoverable_states() else datetime.now(timezone.utc).isoformat()
+        identity_after_json = json.dumps(dataclass_to_jsonable(identity_after), sort_keys=True) if identity_after is not None else None
         with self.database.connection:
             self.database.connection.execute(
                 """
                 UPDATE executed_operation
-                SET result = ?, error_code = ?, error_detail = ?, completed_at = ?
+                SET result = ?, error_code = ?, error_detail = ?, completed_at = ?, identity_after_json = ?
                 WHERE id = ?
                 """,
                 (
@@ -224,6 +331,7 @@ class JournalCoordinator:
                     error.code.value if error else None,
                     error.message if error else None,
                     completed_at,
+                    identity_after_json,
                     executed_id,
                 ),
             )
