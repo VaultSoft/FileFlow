@@ -1,0 +1,154 @@
+import os
+import unittest
+
+from fileflow.models import (
+    ConflictStatus,
+    ErrorCode,
+    FileIdentity,
+    IdentitySnapshot,
+    MetadataSnapshot,
+    OperationIntent,
+    PlanStatus,
+    PlannedOperation,
+    PlannedOperationStatus,
+    PreviewPlan,
+    RevalidationReason,
+    RevalidationResult,
+    RevalidationStatus,
+    SafetyDecision,
+    SafetyReason,
+    ScannedItem,
+    ScannedItemKind,
+    Severity,
+    StructuredError,
+)
+from fileflow.preview_workflow import FolderValidation, PreviewAnalysis, PreviewWorkflowService
+from fileflow.safety import FakeIdentityProvider, FakeReparseInspector, PathChainSafety, WindowsPathPolicy
+from fileflow.ui.presentation import (
+    BLOCKED,
+    COLLISION,
+    READY,
+    UNSUPPORTED,
+    present_analysis,
+    present_revalidation,
+    safety_decision_text,
+)
+
+
+def snapshot(path, file_id=None, file_type="file", size=100):
+    return IdentitySnapshot(
+        FileIdentity("VOL", file_id or path.casefold(), file_type, 1),
+        MetadataSnapshot(path, size, 10, 5),
+    )
+
+
+def operation(index, status, *, conflict=ConflictStatus.NONE, error=None):
+    return PlannedOperation(
+        id=f"op-{index}",
+        operation_type=OperationIntent.MOVE,
+        source_path=rf"C:\FileFlowTest\Root\file{index}.jpg",
+        destination_path=rf"C:\FileFlowTest\Root\Images\file{index}.jpg",
+        source_root=r"C:\FileFlowTest\Root",
+        rule_snapshot=None,
+        category_snapshot=None,
+        reason="matched test rule",
+        safety_status=status,
+        conflict_status=conflict,
+        reversible=False,
+        source_identity=snapshot(rf"C:\FileFlowTest\Root\file{index}.jpg", size=index),
+        preview_index=index,
+        structured_error=error,
+    )
+
+
+class PreviewUiTests(unittest.TestCase):
+    def test_summary_counts_and_row_status_mapping(self):
+        root = r"C:\FileFlowTest\Root"
+        items = (
+            ScannedItem(root + r"\file1.jpg", "file1.jpg", ScannedItemKind.FILE, SafetyDecision.safe(root + r"\file1.jpg"), snapshot("1", size=10)),
+            ScannedItem(root + r"\file2.jpg", "file2.jpg", ScannedItemKind.FILE, SafetyDecision.safe(root + r"\file2.jpg"), snapshot("2", size=20)),
+            ScannedItem(
+                root + r"\Nested",
+                "Nested",
+                ScannedItemKind.DIRECTORY,
+                SafetyDecision.unsupported(SafetyReason.DIRECTORY_SKIPPED, "Skipped"),
+            ),
+        )
+        errors = StructuredError(ErrorCode.DESTINATION_EXISTS, Severity.OPERATION_BLOCKING, "Destination exists.")
+        plan = PreviewPlan(
+            id="plan",
+            profile_id="default",
+            source_root=root,
+            source_root_normalized=root,
+            source_root_identity=snapshot(root, "root", "directory"),
+            destination_root=root,
+            destination_root_identity=snapshot(root, "root", "directory"),
+            status=PlanStatus.BLOCKED,
+            rule_set_version=1,
+            category_version=1,
+            safety_policy_version=1,
+            operations=(
+                operation(1, PlannedOperationStatus.PLANNED),
+                operation(2, PlannedOperationStatus.BLOCKED, conflict=ConflictStatus.DESTINATION_EXISTS, error=errors),
+                operation(3, PlannedOperationStatus.UNSUPPORTED),
+                operation(4, PlannedOperationStatus.BLOCKED),
+            ),
+            rule_snapshots=(),
+            category_snapshots=(),
+            created_at="now",
+        )
+        analysis = PreviewAnalysis(FolderValidation(root, SafetyDecision.safe(root), snapshot(root, "root", "directory")), items, plan)
+
+        presentation = present_analysis(analysis)
+
+        self.assertEqual((READY, COLLISION, UNSUPPORTED, BLOCKED), tuple(row.status for row in presentation.rows))
+        self.assertEqual(2, presentation.summary.total_files)
+        self.assertEqual(1, presentation.summary.ready)
+        self.assertEqual(1, presentation.summary.collisions)
+        self.assertEqual(1, presentation.summary.unsupported)
+        self.assertEqual(1, presentation.summary.blocked)
+        self.assertEqual(1, presentation.summary.skipped_subdirectories)
+        self.assertEqual(30, presentation.summary.total_bytes)
+        self.assertFalse(presentation.can_apply)
+
+    def test_user_facing_safety_reason_text(self):
+        decision = SafetyDecision.block(SafetyReason.REPARSE_POINT, "raw")
+        self.assertIn("junction", safety_decision_text(decision))
+
+    def test_stale_preview_presentation_requires_reanalysis(self):
+        result = RevalidationResult(RevalidationStatus.STALE, (RevalidationReason.DESTINATION_APPEARED,), ())
+        presentation = present_revalidation(result)
+        self.assertEqual("STALE", presentation.status)
+        self.assertIn("out of date", presentation.title)
+        self.assertIn("Analyse again", presentation.message)
+        self.assertIn("destination appeared", presentation.reasons[0])
+
+    def test_folder_selection_blocks_reparse_root(self):
+        policy = WindowsPathPolicy()
+        root = r"C:\Users\Josh\Downloads\FileFlowRoot"
+        service = PreviewWorkflowService(
+            path_policy=policy,
+            chain_safety=PathChainSafety(policy, FakeReparseInspector({root})),
+            identity_provider=FakeIdentityProvider({root: snapshot(root, "root", "directory")}),
+        )
+        validation = service.validate_folder(root)
+        self.assertFalse(validation.allowed)
+        self.assertEqual(SafetyReason.REPARSE_POINT, validation.decision.reason)
+
+    def test_main_window_apply_button_starts_disabled(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        self.assertFalse(window.apply_button.isEnabled())
+        window.close()
+        self.assertIsNotNone(app)
+
+
+if __name__ == "__main__":
+    unittest.main()

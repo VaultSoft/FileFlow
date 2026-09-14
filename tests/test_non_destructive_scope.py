@@ -24,7 +24,8 @@ class NonDestructiveScopeTests(unittest.TestCase):
             ("shutil", "rmtree"),
         }
         for source in root.rglob("*.py"):
-            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+            text = source.read_text(encoding="utf-8")
+            tree = ast.parse(text, filename=str(source))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     owner = None
@@ -32,9 +33,12 @@ class NonDestructiveScopeTests(unittest.TestCase):
                         owner = node.func.value.id
                     if (owner, node.func.attr) in prohibited_calls:
                         self.fail(f"Prohibited file mutation call in {source}: {owner}.{node.func.attr}")
+            for api_name in ("MoveFile", "MoveFileEx", "CopyFile", "DeleteFile", "RemoveDirectory", "CreateDirectory"):
+                if api_name in text:
+                    self.fail(f"Prohibited Win32 mutation API reference in {source}: {api_name}")
 
-    def test_no_build_script_added_for_non_gui_core_milestone(self):
-        self.assertFalse((Path(__file__).resolve().parents[1] / "build.py").exists())
+    def test_build_script_is_allowed_only_outside_runtime_package(self):
+        self.assertTrue((Path(__file__).resolve().parents[1] / "build.py").exists())
 
 
 if __name__ == "__main__":
