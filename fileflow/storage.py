@@ -126,6 +126,17 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         CREATE INDEX IF NOT EXISTS idx_error_event_scope ON error_event(scope, scope_id);
         """,
     ),
+    (
+        2,
+        "execution_lock",
+        """
+        CREATE TABLE IF NOT EXISTS execution_lock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            owner TEXT NOT NULL,
+            acquired_at TEXT NOT NULL
+        );
+        """,
+    ),
 )
 
 

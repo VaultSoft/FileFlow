@@ -283,6 +283,23 @@ class StorageAndJournalTests(unittest.TestCase):
         row = self.db.connection.execute("SELECT result FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
         self.assertEqual(JournalState.RECOVERY_REQUIRED.value, row["result"])
 
+    def test_guarded_execution_update_refuses_unexpected_state(self):
+        plan = self.make_plan()
+        coordinator = JournalCoordinator(self.db, MockOperationExecutor())
+        batch_id = coordinator.execute_mock_batch(plan, stop_after=JournalState.INTENT_RECORDED)
+        row = self.db.connection.execute("SELECT id FROM executed_operation WHERE batch_id = ?", (batch_id,)).fetchone()
+        with self.db.connection:
+            self.db.connection.execute(
+                "UPDATE executed_operation SET result = ? WHERE id = ?",
+                (JournalState.SUCCEEDED.value, row["id"]),
+            )
+
+        with self.assertRaises(JournalExecutionBlocked):
+            coordinator._update_execution(row["id"], JournalState.IN_PROGRESS, None, expected_state=JournalState.INTENT_RECORDED)
+
+        after = self.db.connection.execute("SELECT result FROM executed_operation WHERE id = ?", (row["id"],)).fetchone()
+        self.assertEqual(JournalState.SUCCEEDED.value, after["result"])
+
 
 if __name__ == "__main__":
     unittest.main()

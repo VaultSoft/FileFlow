@@ -5,7 +5,7 @@ import uuid
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .app_metadata import APP_VERSION
 from .models import (
@@ -111,35 +111,56 @@ class JournalCoordinator:
                 return batch_id
         return batch_id
 
-    def execute_real_move_batch(self, plan: PreviewPlan, stop_after: JournalState | None = None) -> str:
+    def execute_real_move_batch(
+        self,
+        plan: PreviewPlan,
+        stop_after: JournalState | None = None,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+    ) -> str:
         self._raise_if_plan_has_unresolved_work(plan.id)
         self._raise_if_any_unresolved_real_work(plan.id)
         if not isinstance(self.executor, SameVolumeMoveExecutor):
             raise TypeError("execute_real_move_batch requires SameVolumeMoveExecutor.")
+        lock_owner = str(uuid.uuid4())
+        self._acquire_execution_lock(lock_owner)
         batch_id = str(uuid.uuid4())
         approved_at = datetime.now(timezone.utc).isoformat()
-        with self.database.connection:
-            self.database.connection.execute(
-                """
-                INSERT INTO operation_batch(
-                    id, plan_id, profile_id, status, approved_at, app_version, summary_json, recovery_required
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-                """,
-                (batch_id, plan.id, plan.profile_id, JournalState.APPROVED.value, approved_at, APP_VERSION, "{}"),
+        try:
+            summary_json = json.dumps(
+                {
+                    "source_root": plan.source_root,
+                    "operation_count": len(plan.operations),
+                    "ready_count": sum(1 for operation in plan.operations if operation.safety_status == PlannedOperationStatus.PLANNED),
+                },
+                sort_keys=True,
             )
-        self._mark_batch_started(batch_id)
-        for operation in plan.operations:
-            completed = self._execute_real_move_one(batch_id, plan, operation, stop_after=stop_after)
-            self._refresh_batch_status(batch_id)
-            if not completed:
-                return batch_id
-            row = self.database.connection.execute(
-                "SELECT result FROM executed_operation WHERE batch_id = ? AND planned_operation_id = ? ORDER BY started_at DESC LIMIT 1",
-                (batch_id, operation.id),
-            ).fetchone()
-            if row is not None and row["result"] in (JournalState.INTERRUPTED.value, JournalState.RECOVERY_REQUIRED.value):
-                return batch_id
-        return batch_id
+            with self.database.connection:
+                self.database.connection.execute(
+                    """
+                    INSERT INTO operation_batch(
+                        id, plan_id, profile_id, status, approved_at, app_version, summary_json, recovery_required
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (batch_id, plan.id, plan.profile_id, JournalState.APPROVED.value, approved_at, APP_VERSION, summary_json),
+                )
+            self._mark_batch_started(batch_id)
+            total = len(plan.operations)
+            for index, operation in enumerate(plan.operations, start=1):
+                if progress_callback is not None:
+                    progress_callback(operation.source_path, index, total)
+                completed = self._execute_real_move_one(batch_id, plan, operation, stop_after=stop_after)
+                self._refresh_batch_status(batch_id)
+                if not completed:
+                    return batch_id
+                row = self.database.connection.execute(
+                    "SELECT result FROM executed_operation WHERE batch_id = ? AND planned_operation_id = ? ORDER BY started_at DESC LIMIT 1",
+                    (batch_id, operation.id),
+                ).fetchone()
+                if row is not None and row["result"] in (JournalState.INTERRUPTED.value, JournalState.RECOVERY_REQUIRED.value):
+                    return batch_id
+            return batch_id
+        finally:
+            self._release_execution_lock(lock_owner)
 
     def _execute_one(self, batch_id: str, operation: PlannedOperation, stop_after: JournalState | None = None) -> bool:
         started_at = datetime.now(timezone.utc).isoformat()
@@ -181,8 +202,9 @@ class JournalCoordinator:
             self._record_state_event(executed_id, batch_id, operation.id, state)
         if stop_after == state:
             return False
+        previous = state
         state = self.state_machine.transition(state, JournalState.IN_PROGRESS)
-        self._update_execution(executed_id, state, None)
+        self._update_execution(executed_id, state, None, expected_state=previous)
         if stop_after == state:
             return False
         result = self.executor.execute(operation)
@@ -247,23 +269,25 @@ class JournalCoordinator:
         if stop_after == state:
             return False
 
+        previous = state
         state = self.state_machine.transition(state, JournalState.IN_PROGRESS)
-        self._update_execution(executed_id, state, None)
+        self._update_execution(executed_id, state, None, expected_state=previous)
         if stop_after == state:
             return False
 
         move_result = executor.move(preflight)
         if move_result.outcome == ExecutionOutcome.INTERRUPTED:
             state = self.state_machine.transition(state, JournalState.INTERRUPTED)
-            self._update_execution(executed_id, state, move_result.error)
+            self._update_execution(executed_id, state, move_result.error, expected_state=JournalState.IN_PROGRESS)
             return True
         if move_result.outcome != ExecutionOutcome.SUCCEEDED:
             state = self.state_machine.transition(state, JournalState.FAILED)
-            self._update_execution(executed_id, state, move_result.error)
+            self._update_execution(executed_id, state, move_result.error, expected_state=JournalState.IN_PROGRESS)
             return True
 
+        previous = state
         state = self.state_machine.transition(state, JournalState.VERIFYING)
-        self._update_execution(executed_id, state, None)
+        self._update_execution(executed_id, state, None, expected_state=previous)
         if stop_after == state:
             return False
 
@@ -282,10 +306,11 @@ class JournalCoordinator:
                         "Destination identity could not be verified after move.",
                         {"operation_id": operation.id, "destination": operation.destination_path},
                     ),
+                    expected_state=JournalState.VERIFYING,
                 )
                 return True
             state = self.state_machine.transition(state, JournalState.SUCCEEDED)
-            self._update_execution(executed_id, state, None, identity_after.snapshot if identity_after.supported else None)
+            self._update_execution(executed_id, state, None, identity_after.snapshot if identity_after.supported else None, expected_state=JournalState.VERIFYING)
         else:
             state = self.state_machine.transition(state, JournalState.RECOVERY_REQUIRED)
             self._update_execution(
@@ -298,6 +323,7 @@ class JournalCoordinator:
                     "Move completed but post-move verification could not prove success.",
                     {"operation_id": operation.id, "destination": operation.destination_path},
                 ),
+                expected_state=JournalState.VERIFYING,
             )
         return True
 
@@ -341,25 +367,60 @@ class JournalCoordinator:
             )
             self._record_state_event(executed_id, batch_id, operation.id, state)
 
-    def _update_execution(self, executed_id: str, state: JournalState, error: StructuredError | None, identity_after=None) -> None:
+    def _update_execution(
+        self,
+        executed_id: str,
+        state: JournalState,
+        error: StructuredError | None,
+        identity_after=None,
+        *,
+        expected_state: JournalState | None = None,
+    ) -> None:
         completed_at = None if state in self.state_machine.recoverable_states() else datetime.now(timezone.utc).isoformat()
         identity_after_json = json.dumps(dataclass_to_jsonable(identity_after), sort_keys=True) if identity_after is not None else None
         with self.database.connection:
-            self.database.connection.execute(
-                """
-                UPDATE executed_operation
-                SET result = ?, error_code = ?, error_detail = ?, completed_at = ?, identity_after_json = ?
-                WHERE id = ?
-                """,
-                (
-                    state.value,
-                    error.code.value if error else None,
-                    error.message if error else None,
-                    completed_at,
-                    identity_after_json,
-                    executed_id,
-                ),
-            )
+            if expected_state is None:
+                cursor = self.database.connection.execute(
+                    """
+                    UPDATE executed_operation
+                    SET result = ?, error_code = ?, error_detail = ?, completed_at = ?, identity_after_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        state.value,
+                        error.code.value if error else None,
+                        error.message if error else None,
+                        completed_at,
+                        identity_after_json,
+                        executed_id,
+                    ),
+                )
+            else:
+                cursor = self.database.connection.execute(
+                    """
+                    UPDATE executed_operation
+                    SET result = ?, error_code = ?, error_detail = ?, completed_at = ?, identity_after_json = ?
+                    WHERE id = ? AND result = ?
+                    """,
+                    (
+                        state.value,
+                        error.code.value if error else None,
+                        error.message if error else None,
+                        completed_at,
+                        identity_after_json,
+                        executed_id,
+                        expected_state.value,
+                    ),
+                )
+            if cursor.rowcount != 1:
+                raise JournalExecutionBlocked(
+                    StructuredError(
+                        ErrorCode.RECOVERY_REQUIRED,
+                        Severity.RECOVERY,
+                        "Journal state changed unexpectedly during execution.",
+                        {"executed_operation_id": executed_id, "requested_state": state.value},
+                    )
+                )
             row = self.database.connection.execute(
                 "SELECT batch_id, planned_operation_id FROM executed_operation WHERE id = ?",
                 (executed_id,),
@@ -451,6 +512,69 @@ class JournalCoordinator:
             )
         )
 
+    def batch_summary(self, batch_id: str) -> sqlite3.Row | None:
+        return self.database.connection.execute(
+            """
+            SELECT
+                operation_batch.*,
+                COUNT(executed_operation.id) AS attempted_count,
+                SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS succeeded_count,
+                SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS failed_count,
+                SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS blocked_count,
+                SUM(CASE WHEN executed_operation.result IN (?, ?) THEN 1 ELSE 0 END) AS recovery_count
+            FROM operation_batch
+            LEFT JOIN executed_operation ON executed_operation.batch_id = operation_batch.id
+            WHERE operation_batch.id = ?
+            GROUP BY operation_batch.id
+            """,
+            (
+                JournalState.SUCCEEDED.value,
+                JournalState.FAILED.value,
+                JournalState.BLOCKED.value,
+                JournalState.INTERRUPTED.value,
+                JournalState.RECOVERY_REQUIRED.value,
+                batch_id,
+            ),
+        ).fetchone()
+
+    def list_batches(self) -> tuple[sqlite3.Row, ...]:
+        return tuple(
+            self.database.connection.execute(
+                """
+                SELECT
+                    operation_batch.*,
+                    COUNT(executed_operation.id) AS attempted_count,
+                    SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS succeeded_count,
+                    SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN executed_operation.result = ? THEN 1 ELSE 0 END) AS blocked_count,
+                    SUM(CASE WHEN executed_operation.result IN (?, ?) THEN 1 ELSE 0 END) AS recovery_count
+                FROM operation_batch
+                LEFT JOIN executed_operation ON executed_operation.batch_id = operation_batch.id
+                GROUP BY operation_batch.id
+                ORDER BY COALESCE(operation_batch.started_at, operation_batch.approved_at) DESC
+                """,
+                (
+                    JournalState.SUCCEEDED.value,
+                    JournalState.FAILED.value,
+                    JournalState.BLOCKED.value,
+                    JournalState.INTERRUPTED.value,
+                    JournalState.RECOVERY_REQUIRED.value,
+                ),
+            )
+        )
+
+    def list_batch_operations(self, batch_id: str) -> tuple[sqlite3.Row, ...]:
+        return tuple(
+            self.database.connection.execute(
+                """
+                SELECT * FROM executed_operation
+                WHERE batch_id = ?
+                ORDER BY started_at, planned_operation_id
+                """,
+                (batch_id,),
+            )
+        )
+
     def operation_state_history(self, operation_id: str | None = None, *, batch_id: str | None = None, executed_operation_id: str | None = None) -> tuple[str, ...]:
         filters: list[str] = []
         params: list[str] = []
@@ -531,6 +655,27 @@ class JournalCoordinator:
                 "UPDATE operation_batch SET status = ?, started_at = ? WHERE id = ?",
                 (JournalState.IN_PROGRESS.value, datetime.now(timezone.utc).isoformat(), batch_id),
             )
+
+    def _acquire_execution_lock(self, owner: str) -> None:
+        try:
+            with self.database.connection:
+                self.database.connection.execute(
+                    "INSERT INTO execution_lock(id, owner, acquired_at) VALUES (1, ?, ?)",
+                    (owner, datetime.now(timezone.utc).isoformat()),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise JournalExecutionBlocked(
+                StructuredError(
+                    ErrorCode.RECOVERY_REQUIRED,
+                    Severity.RECOVERY,
+                    "Another FileFlow apply operation is already active.",
+                    {"owner": owner},
+                )
+            ) from exc
+
+    def _release_execution_lock(self, owner: str) -> None:
+        with self.database.connection:
+            self.database.connection.execute("DELETE FROM execution_lock WHERE id = 1 AND owner = ?", (owner,))
 
     def _raise_if_plan_has_unresolved_work(self, plan_id: str) -> None:
         unresolved = self.operations_requiring_recovery_for_plan(plan_id)

@@ -24,15 +24,27 @@ _prepare_frozen_qt_path()
 from PyQt6.QtWidgets import QApplication
 
 from .app_metadata import APP_NAME
+from .storage import Database
 from .ui.main_window import MainWindow
+
+
+def default_database_path() -> Path:
+    root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "FileFlow"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "fileflow.db"
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    window = MainWindow()
+    database = Database(default_database_path())
+    database.migrate()
+    window = MainWindow(database=database)
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        database.close()
 
 
 if __name__ == "__main__":
