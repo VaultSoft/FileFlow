@@ -276,7 +276,16 @@ class PathChainSafety:
         if not decision.allowed or decision.normalized_path is None:
             return decision
         for component_path in self._component_paths(decision.normalized_path):
-            info = self.reparse_inspector.inspect(component_path)
+            try:
+                info = self.reparse_inspector.inspect(component_path)
+            except Exception as exc:
+                return SafetyDecision.block(
+                    SafetyReason.REPARSE_INSPECTION_FAILED,
+                    "Could not prove the path chain is free of reparse points.",
+                    normalized_path=decision.normalized_path,
+                    code=ErrorCode.REPARSE_POINT,
+                    details={"path": component_path, "error": str(exc)},
+                )
             if info.error is not None:
                 return SafetyDecision.block(
                     SafetyReason.REPARSE_INSPECTION_FAILED,

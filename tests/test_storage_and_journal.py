@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from dataclasses import replace
+import ntpath
 from pathlib import Path
 
 from fileflow.journal import JournalCoordinator, JournalExecutionBlocked, JournalStateMachine, MockExecutorConfig, MockOperationExecutor
@@ -37,7 +38,12 @@ class StorageAndJournalTests(unittest.TestCase):
         source = r"C:\FileFlowTest\Root\doc.pdf"
         identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "doc")}
         item = ScannedItem(source, "doc.pdf", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
-        return PreviewPlanner(self.policy, self.chain, FakeIdentityProvider(identities)).create_plan(
+        return PreviewPlanner(
+            self.policy,
+            self.chain,
+            FakeIdentityProvider(identities),
+            entry_exists=lambda path: ntpath.splitext(ntpath.basename(self.policy.normalize(path)))[1] == "",
+        ).create_plan(
             profile_id="default",
             source_root=root,
             destination_root=root,
@@ -174,7 +180,12 @@ class StorageAndJournalTests(unittest.TestCase):
             source = r"C:\FileFlowTest\Root\doc.pdf"
             identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "doc")}
             item = ScannedItem(source, "doc.pdf", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
-            plan = PreviewPlanner(policy, chain, FakeIdentityProvider(identities)).create_plan(
+            plan = PreviewPlanner(
+                policy,
+                chain,
+                FakeIdentityProvider(identities),
+                entry_exists=lambda path: ntpath.splitext(ntpath.basename(policy.normalize(path)))[1] == "",
+            ).create_plan(
                 profile_id="default",
                 source_root=root,
                 destination_root=root,

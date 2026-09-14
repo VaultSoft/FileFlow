@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import replace
+import ntpath
 from pathlib import Path
 import tempfile
 
@@ -34,7 +35,11 @@ class PlanningTests(unittest.TestCase):
         self.chain = PathChainSafety(self.policy, FakeReparseInspector())
 
     def planner_with_identities(self, identities):
-        return PreviewPlanner(self.policy, self.chain, FakeIdentityProvider(identities))
+        return PreviewPlanner(self.policy, self.chain, FakeIdentityProvider(identities), entry_exists=self.synthetic_entry_exists)
+
+    def synthetic_entry_exists(self, path):
+        basename = ntpath.basename(self.policy.normalize(path))
+        return ntpath.splitext(basename)[1] == ""
 
     def test_plan_freezes_exact_destination_and_snapshots(self):
         root = r"C:\FileFlowTest\Root"
@@ -311,6 +316,7 @@ class PlanningTests(unittest.TestCase):
                 categories=default_categories(),
             )
             self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
+            self.assertIn("parent does not exist", plan.operations[0].structured_error.message)
 
     def test_dangling_destination_entry_counts_as_occupied(self):
         root = r"C:\FileFlowTest\Root"
@@ -322,7 +328,7 @@ class PlanningTests(unittest.TestCase):
             self.policy,
             self.chain,
             FakeIdentityProvider(identities),
-            entry_exists=lambda candidate: candidate.casefold() == destination.casefold(),
+            entry_exists=lambda candidate: candidate.casefold() in {destination.casefold(), r"C:\FileFlowTest\Root\Images".casefold()},
         )
         plan = planner.create_plan(
             profile_id="default",
@@ -333,7 +339,35 @@ class PlanningTests(unittest.TestCase):
             categories=default_categories(),
         )
         self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
-        self.assertEqual(SafetyReason.DESTINATION_EXISTS, plan.operations[0].structured_error.details.get("reason", SafetyReason.DESTINATION_EXISTS))
+        self.assertIn("destination already exists", plan.operations[0].structured_error.message)
+
+    def test_destination_occupancy_inspection_failure_blocks_operation(self):
+        root = r"C:\FileFlowTest\Root"
+        source = r"C:\FileFlowTest\Root\Photo.JPG"
+        identities = {root: snapshot(root, "root", "directory"), source: snapshot(source, "photo")}
+        item = ScannedItem(source, "Photo.JPG", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
+
+        def raising_exists(path):
+            if path.endswith("Photo.JPG"):
+                raise OSError("lexists failed")
+            return True
+
+        planner = PreviewPlanner(
+            self.policy,
+            self.chain,
+            FakeIdentityProvider(identities),
+            entry_exists=raising_exists,
+        )
+        plan = planner.create_plan(
+            profile_id="default",
+            source_root=root,
+            destination_root=root,
+            items=(item,),
+            rules=default_rules(default_categories()),
+            categories=default_categories(),
+        )
+        self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
+        self.assertIn("Could not inspect destination", plan.operations[0].structured_error.message)
 
     def test_root_directory_mtime_change_does_not_stale_when_identity_is_same(self):
         root = r"C:\FileFlowTest\Root"

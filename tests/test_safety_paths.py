@@ -82,6 +82,16 @@ class ReparseChainSafetyTests(unittest.TestCase):
         decision = chain.classify_chain(r"C:\Users\Josh\Downloads\file.txt", r"C:\Users\Josh\Downloads")
         self.assertEqual(SafetyReason.REPARSE_INSPECTION_FAILED, decision.reason)
 
+    def test_fails_closed_when_reparse_inspector_raises_at_root(self):
+        class RaisingInspector:
+            def inspect(self, path):
+                raise RuntimeError("inspector unavailable")
+
+        chain = PathChainSafety(self.policy, RaisingInspector())
+        decision = chain.classify_chain(r"C:\Users\Josh\Downloads")
+        self.assertEqual(SafetyReason.REPARSE_INSPECTION_FAILED, decision.reason)
+        self.assertIn("inspector unavailable", decision.error.details["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

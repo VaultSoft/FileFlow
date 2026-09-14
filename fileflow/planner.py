@@ -131,6 +131,38 @@ class PreviewPlanner:
                 preview_index += 1
                 continue
             destination_parent = ntpath.dirname(destination.normalized_path)
+            parent_exists, parent_error = self._entry_exists(destination_parent)
+            if parent_error is not None:
+                operations.append(
+                    self._blocked_operation(
+                        item,
+                        root_decision.normalized_path,
+                        preview_index,
+                        reason="Planned destination parent could not be inspected.",
+                        destination_path=destination.normalized_path,
+                        safety=parent_error,
+                    )
+                )
+                preview_index += 1
+                continue
+            if not parent_exists:
+                operations.append(
+                    self._blocked_operation(
+                        item,
+                        root_decision.normalized_path,
+                        preview_index,
+                        reason="Planned destination parent does not exist.",
+                        destination_path=destination.normalized_path,
+                        safety=SafetyDecision.block(
+                            SafetyReason.DESTINATION_PARENT_MISSING,
+                            "Planned destination parent does not exist.",
+                            normalized_path=destination_parent,
+                            code=ErrorCode.DESTINATION_UNSAFE,
+                        ),
+                    )
+                )
+                preview_index += 1
+                continue
             destination_parent_chain = self.chain_safety.classify_chain(destination_parent, destination_decision.normalized_path)
             if not destination_parent_chain.allowed:
                 operations.append(
@@ -145,7 +177,21 @@ class PreviewPlanner:
                 )
                 preview_index += 1
                 continue
-            if self.entry_exists(destination.normalized_path):
+            destination_exists, destination_error = self._entry_exists(destination.normalized_path)
+            if destination_error is not None:
+                operations.append(
+                    self._blocked_operation(
+                        item,
+                        root_decision.normalized_path,
+                        preview_index,
+                        reason="Planned destination could not be inspected.",
+                        destination_path=destination.normalized_path,
+                        safety=destination_error,
+                    )
+                )
+                preview_index += 1
+                continue
+            if destination_exists:
                 operations.append(
                     self._blocked_operation(
                         item,
@@ -153,6 +199,7 @@ class PreviewPlanner:
                         preview_index,
                         reason="Planned destination already exists.",
                         destination_path=destination.normalized_path,
+                        conflict_status=ConflictStatus.DESTINATION_EXISTS,
                         safety=SafetyDecision.block(
                             SafetyReason.DESTINATION_EXISTS,
                             "Planned destination already exists.",
@@ -221,6 +268,18 @@ class PreviewPlanner:
         status = PlanStatus.BLOCKED if any(op.safety_status != PlannedOperationStatus.PLANNED for op in updated) else plan.status
         return replace(plan, operations=tuple(updated), status=status)
 
+    def _entry_exists(self, path: str) -> tuple[bool, SafetyDecision | None]:
+        try:
+            return bool(self.entry_exists(path)), None
+        except OSError as exc:
+            return False, SafetyDecision.block(
+                SafetyReason.SCAN_FAILED,
+                "Could not inspect destination path state.",
+                normalized_path=path,
+                code=ErrorCode.UNKNOWN_IO_ERROR,
+                details={"path": path, "error": str(exc)},
+            )
+
     def _blocked_operation(
         self,
         item: ScannedItem,
@@ -229,6 +288,7 @@ class PreviewPlanner:
         *,
         reason: str | None = None,
         destination_path: str | None = None,
+        conflict_status: ConflictStatus = ConflictStatus.NONE,
         safety: SafetyDecision | None = None,
     ) -> PlannedOperation:
         decision = safety or item.safety
@@ -243,7 +303,7 @@ class PreviewPlanner:
             category_snapshot=None,
             reason=reason or (decision.error.message if decision.error else decision.reason.value),
             safety_status=status,
-            conflict_status=ConflictStatus.NONE,
+            conflict_status=conflict_status,
             reversible=False,
             source_identity=item.identity,
             preview_index=preview_index,
@@ -432,7 +492,12 @@ class PlanRevalidator:
             )
             return
 
-        if self.entry_exists(destination_policy.normalized_path):
+        destination_exists, destination_error = self._entry_exists(destination_policy.normalized_path)
+        if destination_error is not None:
+            blocked_reasons.append(RevalidationReason.DESTINATION_PATH_POLICY_CHANGED)
+            errors.append(destination_error)
+            return
+        if destination_exists:
             stale_reasons.append(RevalidationReason.DESTINATION_APPEARED)
             errors.append(
                 StructuredError(
@@ -457,4 +522,15 @@ class PlanRevalidator:
                     "A case-equivalent destination collision appeared after preview.",
                     {"destination": destination_policy.normalized_path, "operation_id": operation.id},
                 )
+            )
+
+    def _entry_exists(self, path: str) -> tuple[bool, StructuredError | None]:
+        try:
+            return bool(self.entry_exists(path)), None
+        except OSError as exc:
+            return False, StructuredError(
+                ErrorCode.UNKNOWN_IO_ERROR,
+                Severity.OPERATION_BLOCKING,
+                "Could not inspect destination path state.",
+                {"path": path, "error": str(exc)},
             )
