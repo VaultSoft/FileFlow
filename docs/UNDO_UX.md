@@ -1,7 +1,7 @@
 # Undo UX
 
-Milestone 3A defines this flow only. It does not add, enable, or wire an Undo
-control.
+Milestone 3A defined this flow. Milestone 3B exposes it through History and an
+explicit Undo Preview; no History action performs a one-click mutation.
 
 ## History Entry Point
 
@@ -9,7 +9,7 @@ History remains readable during mutation lockout. Each Apply batch row shows
 its persisted status and counts. A details view lists every original execution
 and any linked Undo attempts.
 
-A future `Preview Undo` button appears only for a completed Apply batch that has
+A `Preview Undo` button appears only for a completed Apply batch that has
 at least one successful same-volume move candidate. The button opens preview;
 it never mutates immediately. If global unresolved work exists, History remains
 available but the control is disabled with the recovery reason.
@@ -101,8 +101,8 @@ delete, overwrite, find-file, or automatic repair action.
 
 Future packaged GUI coverage should prove:
 
-- Undo controls are absent or disabled until implementation is intentionally
-  enabled
+- Undo controls start disabled and enable only for an eligible selected Apply
+  batch and a valid Undo Preview
 - History opens without mutation
 - Undo Preview shows exact persisted paths and blocked reasons
 - confirmation defaults to Cancel

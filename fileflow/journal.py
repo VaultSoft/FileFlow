@@ -114,6 +114,10 @@ class ExecutionLockAssessment:
             ExecutionLockState.UNKNOWN_OWNER,
         )
 
+    @property
+    def blocks_mutation(self) -> bool:
+        return self.blocks_apply
+
 
 class JournalCoordinator:
     def __init__(
@@ -546,7 +550,7 @@ class JournalCoordinator:
         return self.mark_recovery_required(executed_operation_id=executed_operation_id)
 
     def _raise_if_any_unresolved_real_work(self, current_plan_id: str) -> None:
-        unresolved = self.operations_requiring_recovery()
+        unresolved = self.all_operations_requiring_recovery()
         if unresolved:
             raise JournalExecutionBlocked(
                 StructuredError(
@@ -574,6 +578,27 @@ class JournalCoordinator:
                 ),
             )
         )
+
+    def undo_operations_requiring_recovery(self) -> tuple[sqlite3.Row, ...]:
+        return tuple(
+            self.database.connection.execute(
+                """
+                SELECT * FROM undo_execution
+                WHERE state IN (?, ?, ?, ?, ?)
+                ORDER BY started_at, id
+                """,
+                (
+                    JournalState.INTENT_RECORDED.value,
+                    JournalState.IN_PROGRESS.value,
+                    JournalState.VERIFYING.value,
+                    JournalState.INTERRUPTED.value,
+                    JournalState.RECOVERY_REQUIRED.value,
+                ),
+            )
+        )
+
+    def all_operations_requiring_recovery(self) -> tuple[sqlite3.Row, ...]:
+        return self.operations_requiring_recovery() + self.undo_operations_requiring_recovery()
 
     def batch_summary(self, batch_id: str) -> sqlite3.Row | None:
         return self.database.connection.execute(
@@ -742,7 +767,7 @@ class JournalCoordinator:
                 ExecutionLockState.UNKNOWN_OWNER,
                 "FileFlow cannot safely verify whether another Apply is still active. Apply remains blocked.",
             )
-        if self.operations_requiring_recovery():
+        if self.all_operations_requiring_recovery():
             return ExecutionLockAssessment(
                 ExecutionLockState.UNRESOLVED_WORK,
                 "A previous move could not be fully verified. FileFlow has stopped further changes until it is reviewed.",
@@ -762,11 +787,16 @@ class JournalCoordinator:
                       SELECT 1 FROM executed_operation
                       WHERE result IN ({placeholders})
                   )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM undo_execution
+                      WHERE state IN ({placeholders})
+                  )
                 """,
                 (
                     row["owner"],
                     int(row["process_id"]),
                     str(row["process_started_at"]),
+                    *recoverable_states,
                     *recoverable_states,
                 ),
             )
@@ -820,6 +850,9 @@ class JournalCoordinator:
             ) from exc
         return owner
 
+    def acquire_mutation_lock(self) -> ExecutionLockOwner:
+        return self._acquire_execution_lock()
+
     def _release_execution_lock(self, owner: ExecutionLockOwner) -> bool:
         with self.database.connection:
             cursor = self.database.connection.execute(
@@ -830,6 +863,9 @@ class JournalCoordinator:
                 (owner.token, owner.process_id, owner.process_started_at),
             )
         return cursor.rowcount == 1
+
+    def release_mutation_lock(self, owner: ExecutionLockOwner) -> bool:
+        return self._release_execution_lock(owner)
 
     def _raise_if_plan_has_unresolved_work(self, plan_id: str) -> None:
         unresolved = self.operations_requiring_recovery_for_plan(plan_id)

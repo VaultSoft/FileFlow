@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import ntpath
 
 from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtWidgets import (
@@ -28,8 +29,10 @@ from ..app_metadata import APP_NAME
 from ..models import StructuredError
 from ..preview_workflow import PreviewAnalysis, PreviewWorkflowService
 from ..storage import Database
+from ..undo import UndoController, UndoControllerState, UndoPlan, UndoResult
 from ..workers.apply_worker import ApplyWorker
 from ..workers.preview_worker import PreviewWorker
+from ..workers.undo_worker import UndoWorker
 from .presentation import PreviewPresentation, PreviewRow, format_bytes, present_analysis, present_revalidation, structured_error_text
 from .styles import APP_STYLESHEET
 
@@ -41,6 +44,7 @@ class MainWindow(QMainWindow):
         self.database = database or Database(":memory:")
         self.database.migrate()
         self.apply_controller = ApplyController(self.database, preview_service=self.service)
+        self.undo_controller = UndoController(self.database)
         self.selected_folder: str | None = None
         self.current_analysis: PreviewAnalysis | None = None
         self.current_presentation: PreviewPresentation | None = None
@@ -50,6 +54,9 @@ class MainWindow(QMainWindow):
         self.apply_worker: ApplyWorker | None = None
         self.apply_state = ApplyState.NO_PREVIEW
         self.history_rows_by_id = {}
+        self.current_undo_plan: UndoPlan | None = None
+        self.undo_thread: QThread | None = None
+        self.undo_worker: UndoWorker | None = None
 
         self.setWindowTitle(APP_NAME)
         self.resize(1120, 720)
@@ -211,6 +218,34 @@ class MainWindow(QMainWindow):
         self.history_detail.setMinimumHeight(120)
         self.history_detail.setPlainText("Select a history row to view its read-only details.")
         layout.addWidget(self.history_detail)
+
+        undo_actions = QHBoxLayout()
+        self.preview_undo_button = QPushButton("Preview Undo")
+        self.preview_undo_button.setObjectName("secondaryButton")
+        self.preview_undo_button.setEnabled(False)
+        self.preview_undo_button.clicked.connect(self.preview_undo)
+        undo_actions.addWidget(self.preview_undo_button)
+        self.confirm_undo_button = QPushButton("Undo Ready Files")
+        self.confirm_undo_button.setEnabled(False)
+        self.confirm_undo_button.clicked.connect(self.start_undo)
+        undo_actions.addWidget(self.confirm_undo_button)
+        undo_actions.addStretch(1)
+        layout.addLayout(undo_actions)
+
+        undo_heading = QLabel("Undo Preview")
+        undo_heading.setObjectName("sectionTitle")
+        layout.addWidget(undo_heading)
+        self.undo_summary_label = QLabel("Select an eligible Apply batch, then choose Preview Undo. No files move during preview.")
+        self.undo_summary_label.setObjectName("muted")
+        self.undo_summary_label.setWordWrap(True)
+        layout.addWidget(self.undo_summary_label)
+        self.undo_table = QTableWidget(0, 5)
+        self.undo_table.setHorizontalHeaderLabels(("Status", "Filename", "Current Location", "Restore Location", "Reason"))
+        self.undo_table.horizontalHeader().setStretchLastSection(True)
+        self.undo_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.undo_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.undo_table.setMinimumHeight(180)
+        layout.addWidget(self.undo_table)
         return page
 
     def _placeholder_page(self, title: str, message: str) -> QWidget:
@@ -348,7 +383,7 @@ class MainWindow(QMainWindow):
         self._refresh_apply_state()
 
     def start_apply(self) -> None:
-        if self.apply_thread is not None or self.current_analysis is None or self.current_analysis.plan is None:
+        if self.apply_thread is not None or self.undo_thread is not None or self.current_analysis is None or self.current_analysis.plan is None:
             return
         plan = self.current_analysis.plan
         readiness = self.apply_controller.validate_before_confirmation(plan)
@@ -438,7 +473,7 @@ class MainWindow(QMainWindow):
             if self.apply_thread is not None
             else self.apply_controller.validate_before_confirmation(plan) if plan is not None else self.apply_controller.readiness(None)
         )
-        if self.apply_state in (ApplyState.COMPLETE, ApplyState.RECOVERY_REQUIRED):
+        if self.apply_state in (ApplyState.COMPLETE, ApplyState.RECOVERY_REQUIRED) or self.undo_thread is not None:
             self.apply_button.setEnabled(False)
         else:
             self.apply_button.setEnabled(readiness.can_apply)
@@ -470,6 +505,7 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.ItemDataRole.UserRole, row["id"])
                 self.history_table.setItem(row_index, column, item)
         unresolved = self.apply_controller.operations_requiring_recovery()
+        undo_recovery = self.undo_controller.recovery_inspections()
         if unresolved:
             first = unresolved[0]
             self.recovery_banner.setObjectName("recoveryWarning")
@@ -478,6 +514,16 @@ class MainWindow(QMainWindow):
             self.recovery_banner.setText(
                 "A previous move could not be fully verified. FileFlow has stopped further changes until the operation is reviewed. "
                 f"Source: {first['source_before']} Destination: {first['destination'] or ''} State: {first['result']}"
+            )
+        elif undo_recovery:
+            first, inspection = undo_recovery[0]
+            self.recovery_banner.setObjectName("recoveryWarning")
+            self.recovery_banner.style().unpolish(self.recovery_banner)
+            self.recovery_banner.style().polish(self.recovery_banner)
+            self.recovery_banner.setText(
+                "A previous Undo could not be fully verified. FileFlow has stopped further changes until the operation is reviewed. "
+                f"Current location: {first['source_before']} Restore location: {first['restore_destination']} "
+                f"State: {first['state']} Assessment: {inspection.classification.value}"
             )
         else:
             lock_status = self.apply_controller.execution_lock_status()
@@ -499,6 +545,10 @@ class MainWindow(QMainWindow):
         row = self.history_rows_by_id.get(batch_id)
         if row is None:
             return
+        self.current_undo_plan = None
+        self.undo_table.setRowCount(0)
+        self.confirm_undo_button.setEnabled(False)
+        self.undo_summary_label.setText("Choose Preview Undo to re-check exact file identities and restore paths. No files move during preview.")
         operations = self.apply_controller.history_operations(batch_id)
         lines = [
             f"Date / time: {format_history_time(row['started_at'] or row['approved_at'])}",
@@ -515,7 +565,144 @@ class MainWindow(QMainWindow):
                 f"{operation['result']}: {operation['source_before']} -> {operation['destination'] or ''}"
                 for operation in operations
             )
+        undo_batches = tuple(batch for batch in self.undo_controller.list_batches() if batch["original_batch_id"] == batch_id)
+        if undo_batches:
+            lines.append("")
+            lines.append("Undo history:")
+            for undo_batch in undo_batches:
+                lines.append(
+                    f"{undo_batch['status']}: restored {undo_batch['succeeded_count'] or 0} of {undo_batch['attempted_count'] or 0}; "
+                    f"failed {undo_batch['failed_count'] or 0}; recovery {undo_batch['recovery_count'] or 0}"
+                )
         self.history_detail.setPlainText("\n".join(lines))
+        self.preview_undo_button.setEnabled(
+            int(row["succeeded_count"] or 0) > 0
+            and self.apply_thread is None
+            and self.undo_thread is None
+        )
+
+    def preview_undo(self) -> None:
+        batch_id = self._selected_history_batch_id()
+        if not batch_id or self.apply_thread is not None or self.undo_thread is not None:
+            return
+        try:
+            plan = self.undo_controller.create_plan(batch_id)
+        except Exception as exc:
+            self.undo_summary_label.setText(f"Undo Preview could not be created safely: {exc}")
+            self.confirm_undo_button.setEnabled(False)
+            return
+        self.current_undo_plan = plan
+        self._render_undo_plan(plan)
+
+    def _render_undo_plan(self, plan: UndoPlan) -> None:
+        self.undo_table.setRowCount(0)
+        for row_index, operation in enumerate(plan.operations):
+            self.undo_table.insertRow(row_index)
+            if operation.reason is not None:
+                reason = operation.reason.message
+            elif operation.metadata_changed:
+                reason = "File changed after Apply. Undo restores location only; current contents move with it."
+            else:
+                reason = "Identity and exact restore path verified."
+            values = (
+                operation.status.value,
+                ntpath.basename(operation.source_path),
+                operation.source_path,
+                operation.restore_path,
+                reason,
+            )
+            for column, value in enumerate(values):
+                self.undo_table.setItem(row_index, column, QTableWidgetItem(value))
+        self.undo_table.resizeColumnsToContents()
+        readiness = self.undo_controller.readiness(plan)
+        self.undo_summary_label.setText(
+            f"Ready: {readiness.ready_count}. Blocked successful moves: {readiness.blocked_count}. "
+            f"Apply operations that never moved successfully: {readiness.excluded_apply_count}. {readiness.message}"
+        )
+        self.confirm_undo_button.setText(f"Undo {readiness.ready_count} File{'s' if readiness.ready_count != 1 else ''}")
+        self.confirm_undo_button.setEnabled(readiness.can_undo and self.apply_thread is None and self.undo_thread is None)
+
+    def start_undo(self) -> None:
+        if self.current_undo_plan is None or self.undo_thread is not None or self.apply_thread is not None:
+            return
+        readiness = self.undo_controller.validate_before_confirmation(self.current_undo_plan)
+        if not readiness.can_undo:
+            self.undo_summary_label.setText(readiness.message + " Create a fresh Undo Preview.")
+            self.confirm_undo_button.setEnabled(False)
+            return
+        summary = self.undo_controller.confirmation_summary(self.current_undo_plan)
+        if not self._confirm_undo(summary):
+            self.undo_summary_label.setText("Undo cancelled. No files were changed.")
+            return
+        self.confirm_undo_button.setEnabled(False)
+        self.preview_undo_button.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self.undo_summary_label.setText("Restoring files to their exact original locations...")
+        self.undo_thread = QThread(self)
+        self.undo_worker = UndoWorker(self.undo_controller, self.current_undo_plan)
+        self.undo_worker.moveToThread(self.undo_thread)
+        self.undo_thread.started.connect(self.undo_worker.run)
+        self.undo_worker.progress.connect(self._undo_progress)
+        self.undo_worker.finished.connect(self._undo_finished)
+        self.undo_worker.failed.connect(self._undo_failed)
+        self.undo_worker.finished.connect(self.undo_thread.quit)
+        self.undo_worker.failed.connect(self.undo_thread.quit)
+        self.undo_thread.finished.connect(self._undo_worker_finished)
+        self.undo_thread.start()
+
+    def _confirm_undo(self, summary) -> bool:
+        message = [
+            summary.message,
+            "",
+            f"Files to restore: {summary.operation_count}",
+            f"Blocked successful moves not included: {summary.blocked_count}",
+            f"Apply operations that did not succeed: {summary.excluded_apply_count}",
+            "FileFlow will never overwrite or auto-rename an occupied original path.",
+        ]
+        if summary.edited_count:
+            message.append(
+                f"Files changed after Apply: {summary.edited_count}. Their current contents and metadata will move with them."
+            )
+        box = QMessageBox(self)
+        box.setWindowTitle("Move files back?")
+        box.setText("\n".join(message))
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        restore = box.addButton("Move Files Back", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is restore
+
+    def _undo_progress(self, source: str, index: int, total: int) -> None:
+        self.undo_summary_label.setText(f"Restoring {index} of {total}: {source}")
+
+    def _undo_finished(self, result: UndoResult) -> None:
+        self.undo_summary_label.setText(result.message)
+        self.confirm_undo_button.setEnabled(False)
+        self.current_undo_plan = None
+        self._refresh_history()
+
+    def _undo_failed(self, error: StructuredError) -> None:
+        self.undo_summary_label.setText(structured_error_text(error))
+        self.confirm_undo_button.setEnabled(False)
+        self._refresh_history()
+
+    def _undo_worker_finished(self) -> None:
+        if self.undo_worker is not None:
+            self.undo_worker.deleteLater()
+        if self.undo_thread is not None:
+            self.undo_thread.deleteLater()
+        self.undo_worker = None
+        self.undo_thread = None
+        self._refresh_apply_state()
+        self._show_history_detail()
+
+    def _selected_history_batch_id(self) -> str | None:
+        selected = self.history_table.selectedItems()
+        if not selected:
+            return None
+        first = self.history_table.item(selected[0].row(), 0)
+        return first.data(Qt.ItemDataRole.UserRole) if first is not None else None
 
 
 def format_row_detail(row: PreviewRow) -> str:

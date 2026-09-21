@@ -20,7 +20,7 @@ from .models import (
 from .operations.same_volume_move import SameVolumeMoveExecutor
 from .process_identity import ProcessIdentityProbe
 from .preview_workflow import PreviewWorkflowService
-from .storage import Database
+from .storage import Database, PlanRepository
 
 
 MAX_APPLY_OPERATIONS = 100
@@ -100,7 +100,7 @@ class ApplyController:
             return ApplyReadiness(ApplyState.APPLYING, False, "FileFlow is already moving files.")
         if plan.id in self._consumed_plan_ids:
             return ApplyReadiness(ApplyState.PREVIEW_STALE, False, "Analyse again before moving more files.")
-        unresolved = coordinator.operations_requiring_recovery()
+        unresolved = coordinator.all_operations_requiring_recovery()
         if unresolved:
             return ApplyReadiness(
                 ApplyState.RECOVERY_REQUIRED,
@@ -191,6 +191,16 @@ class ApplyController:
         executable_plan = _plan_with_operations(plan, operations)
         self._active = True
         try:
+            plans = PlanRepository(self.database)
+            persisted = plans.load_plan(plan.id)
+            if persisted is None:
+                plans.save_plan(plan)
+            elif persisted != plan:
+                return ApplyResult(
+                    ApplyState.PREVIEW_BLOCKED,
+                    None,
+                    "Stored preview data does not match the plan selected for Apply.",
+                )
             coordinator = self._coordinator()
             batch_id = coordinator.execute_real_move_batch(executable_plan, progress_callback=progress_callback)
             summary = coordinator.batch_summary(batch_id)

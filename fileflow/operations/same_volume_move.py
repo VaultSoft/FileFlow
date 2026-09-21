@@ -116,6 +116,13 @@ class RecoveryInspection:
     error: StructuredError | None = None
 
 
+class SameVolumeRenamePrimitive:
+    """The single reviewed raw mutation boundary shared by Apply and Undo."""
+
+    def __call__(self, source_path: str, destination_path: str) -> None:
+        os.rename(source_path, destination_path)
+
+
 class SameVolumeMoveExecutor:
     """Executes exactly one same-volume file move using `os.rename`.
 
@@ -142,7 +149,7 @@ class SameVolumeMoveExecutor:
         self.cloud_classifier = cloud_classifier or ConservativeCloudClassifier()
         self.occupancy = occupancy or DestinationOccupancyInspector()
         self.directory_entries = directory_entries or self._filesystem_entries
-        self.rename_primitive = rename_primitive or os.rename
+        self.rename_primitive = rename_primitive or SameVolumeRenamePrimitive()
         self.before_rename = before_rename
 
     def prepare(self, plan: PreviewPlan, operation: PlannedOperation) -> MovePreflightResult:

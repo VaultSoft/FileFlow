@@ -145,6 +145,95 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         ALTER TABLE execution_lock ADD COLUMN process_started_at TEXT;
         """,
     ),
+    (
+        4,
+        "safe_undo_journal",
+        """
+        CREATE TABLE IF NOT EXISTS undo_plan (
+            id TEXT PRIMARY KEY,
+            original_batch_id TEXT NOT NULL,
+            original_plan_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            safety_policy_version INTEGER NOT NULL,
+            behavior_snapshot_json TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            first_revalidated_at TEXT,
+            second_revalidated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS undo_planned_operation (
+            id TEXT PRIMARY KEY,
+            undo_plan_id TEXT NOT NULL,
+            original_plan_id TEXT NOT NULL,
+            original_batch_id TEXT NOT NULL,
+            original_planned_operation_id TEXT NOT NULL,
+            original_execution_id TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            restore_path TEXT NOT NULL,
+            expected_identity_json TEXT NOT NULL,
+            preview_metadata_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            reason_detail TEXT,
+            snapshot_json TEXT NOT NULL,
+            preview_index INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS undo_batch (
+            id TEXT PRIMARY KEY,
+            undo_plan_id TEXT NOT NULL,
+            original_batch_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            approved_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            app_version TEXT NOT NULL,
+            summary_json TEXT NOT NULL,
+            recovery_required INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS undo_execution (
+            id TEXT PRIMARY KEY,
+            undo_batch_id TEXT NOT NULL,
+            undo_planned_operation_id TEXT NOT NULL,
+            original_execution_id TEXT NOT NULL,
+            source_before TEXT NOT NULL,
+            restore_destination TEXT NOT NULL,
+            expected_identity_json TEXT NOT NULL,
+            identity_before_json TEXT NOT NULL,
+            identity_after_json TEXT,
+            metadata_before_json TEXT NOT NULL,
+            metadata_after_json TEXT,
+            state TEXT NOT NULL,
+            error_code TEXT,
+            error_detail TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS undo_state_event (
+            id TEXT PRIMARY KEY,
+            undo_execution_id TEXT NOT NULL,
+            undo_batch_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_undo_plan_original_batch ON undo_plan(original_batch_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_plan_status ON undo_plan(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_planned_operation_plan ON undo_planned_operation(undo_plan_id, preview_index);
+        CREATE INDEX IF NOT EXISTS idx_undo_planned_operation_original ON undo_planned_operation(original_execution_id);
+        CREATE INDEX IF NOT EXISTS idx_undo_planned_operation_status ON undo_planned_operation(undo_plan_id, status);
+        CREATE INDEX IF NOT EXISTS idx_undo_batch_original ON undo_batch(original_batch_id, approved_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_batch_status ON undo_batch(status, started_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_execution_batch ON undo_execution(undo_batch_id, state);
+        CREATE INDEX IF NOT EXISTS idx_undo_execution_original ON undo_execution(original_execution_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_execution_state ON undo_execution(state, started_at);
+        CREATE INDEX IF NOT EXISTS idx_undo_state_event_execution ON undo_state_event(undo_execution_id, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_undo_execution_one_success
+            ON undo_execution(original_execution_id) WHERE state = 'SUCCEEDED';
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_undo_execution_one_active
+            ON undo_execution(original_execution_id)
+            WHERE state IN ('INTENT_RECORDED', 'IN_PROGRESS', 'VERIFYING', 'INTERRUPTED', 'RECOVERY_REQUIRED');
+        """,
+    ),
 )
 
 

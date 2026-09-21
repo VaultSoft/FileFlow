@@ -1,8 +1,8 @@
 # Undo Model
 
-Milestone 3A defines Undo but does not implement or expose it. Undo is a new
-filesystem mutation workflow. It is not an instruction to swap the source and
-destination strings and call rename.
+Milestone 3A defined this model. Milestone 3B implements its initial
+same-volume Undo workflow. Undo is a new filesystem mutation workflow, not an
+instruction to swap the source and destination strings and call rename.
 
 The first implementation is limited to restoring the location of successfully
 verified same-volume file moves performed by FileFlow. It does not restore file
@@ -179,22 +179,18 @@ primitive. `SameVolumeMoveExecutor` currently embeds Apply-specific plan and
 rule revalidation, so passing an UndoPlan into it directly would weaken type and
 policy boundaries.
 
-Before implementing Undo, extract only the final reviewed same-volume rename
-mechanism behind a narrow typed interface. Keep Apply preflight and Undo
-preflight separate, but route both through that single primitive. There must
-still be exactly one raw `os.rename` call in runtime code. Milestone 3A performs
-no such refactor.
+Milestone 3B keeps Apply and Undo preflight separate and routes both through
+`SameVolumeRenamePrimitive` in the reviewed same-volume move module. There is
+still exactly one raw `os.rename` call in runtime code.
 
-## Open Implementation Questions
+## Remaining Boundaries
 
-These do not change the safety contract, but should be resolved during the
-implementation review:
+These do not change the implemented safety contract:
 
-- the narrow shared primitive's final type and module name
 - the strongest practical Windows handle-sharing strategy for reducing the
   final check-to-rename race without following reparse points
 - the exact presentation threshold for metadata-change warnings
 - the separately reviewed user workflow for reconciling a read-only recovery
   assessment into a terminal journal resolution
-- whether the existing Apply batch-size cap is reused unchanged for Undo or a
-  lower conservative cap is introduced
+
+Milestone 3B uses the same 100-operation cap as Apply.

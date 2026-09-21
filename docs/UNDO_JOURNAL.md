@@ -5,8 +5,8 @@ Undo history is append-only and separate from Apply history. Original
 and state-event rows are immutable evidence. Undo must never rewrite them.
 
 The existing `executed_operation.undo_eligible` and `undo_status` columns are
-legacy placeholders from the initial schema. Future Undo code must not update
-or trust them as authoritative state. Eligibility and current Undo status are
+legacy placeholders from the initial schema. Undo code does not update or trust
+them as authoritative state. Eligibility and current Undo status are
 derived from the original execution plus linked Undo records.
 
 ## Lifecycle
@@ -78,9 +78,8 @@ The intent commit must happen before the rename. A crash between rename and the
 
 ## Append-Only Migration Proposal
 
-Do not edit migrations 1 through 3. Add the Undo schema as migration 4 if 4 is
-still the next available version when implementation begins; otherwise use the
-next unused version.
+Migrations 1 through 3 remain unchanged. Milestone 3B implements the Undo
+schema as append-only migration 4.
 
 ### undo_plan
 

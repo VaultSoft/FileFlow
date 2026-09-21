@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 from fileflow.models import (
     ConflictStatus,
@@ -146,6 +147,76 @@ class PreviewUiTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = MainWindow()
         self.assertFalse(window.apply_button.isEnabled())
+        window.close()
+        self.assertIsNotNone(app)
+
+    def test_main_window_undo_preview_controls_are_present_and_safe_initially(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        self.assertEqual("Preview Undo", window.preview_undo_button.text())
+        self.assertFalse(window.preview_undo_button.isEnabled())
+        self.assertFalse(window.confirm_undo_button.isEnabled())
+        self.assertEqual(5, window.undo_table.columnCount())
+        window.close()
+        self.assertIsNotNone(app)
+
+    def test_undo_confirmation_defaults_and_escapes_to_cancel(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            from fileflow.ui.main_window import MainWindow
+            from fileflow.undo import UndoConfirmationSummary
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        class FakeMessageBox:
+            ButtonRole = QMessageBox.ButtonRole
+
+            def __init__(self, parent):
+                self.buttons = []
+                self.default = None
+                self.escape = None
+                self.clicked = None
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+            def setText(self, text):
+                self.text = text
+
+            def addButton(self, label, role):
+                button = object()
+                self.buttons.append((label, role, button))
+                if role == QMessageBox.ButtonRole.RejectRole:
+                    self.clicked = button
+                return button
+
+            def setDefaultButton(self, button):
+                self.default = button
+
+            def setEscapeButton(self, button):
+                self.escape = button
+
+            def exec(self):
+                cancel = next(button for label, role, button in self.buttons if label == "Cancel")
+                if self.default is not cancel or self.escape is not cancel:
+                    raise AssertionError("Cancel was not the default and escape action")
+
+            def clickedButton(self):
+                return self.clicked
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        summary = UndoConfirmationSummary(1, 0, 0, 0, "FileFlow will move these files back to their original locations.")
+        with patch("fileflow.ui.main_window.QMessageBox", FakeMessageBox):
+            self.assertFalse(window._confirm_undo(summary))
         window.close()
         self.assertIsNotNone(app)
 
