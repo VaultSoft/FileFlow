@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import uuid
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable, Protocol
 
 from .app_metadata import APP_VERSION
@@ -21,6 +22,7 @@ from .models import (
     dataclass_to_jsonable,
 )
 from .operations.same_volume_move import SameVolumeMoveExecutor
+from .process_identity import ProcessIdentityProbe, ProcessOwnerState, WindowsProcessIdentityProbe
 from .storage import Database
 
 
@@ -84,11 +86,47 @@ class JournalExecutionBlocked(RuntimeError):
         self.status = JournalState.RECOVERY_REQUIRED
 
 
+@dataclass(frozen=True)
+class ExecutionLockOwner:
+    token: str
+    process_id: int
+    process_started_at: str
+
+
+class ExecutionLockState(str, Enum):
+    NONE = "NONE"
+    ACTIVE = "ACTIVE"
+    RECOVERED = "RECOVERED"
+    UNRESOLVED_WORK = "UNRESOLVED_WORK"
+    UNKNOWN_OWNER = "UNKNOWN_OWNER"
+
+
+@dataclass(frozen=True)
+class ExecutionLockAssessment:
+    state: ExecutionLockState
+    message: str
+
+    @property
+    def blocks_apply(self) -> bool:
+        return self.state in (
+            ExecutionLockState.ACTIVE,
+            ExecutionLockState.UNRESOLVED_WORK,
+            ExecutionLockState.UNKNOWN_OWNER,
+        )
+
+
 class JournalCoordinator:
-    def __init__(self, database: Database, executor: OperationExecutor):
+    def __init__(
+        self,
+        database: Database,
+        executor: OperationExecutor,
+        *,
+        process_probe: ProcessIdentityProbe | None = None,
+    ):
         self.database = database
         self.executor = executor
         self.state_machine = JournalStateMachine()
+        self.process_probe = process_probe or WindowsProcessIdentityProbe()
 
     def execute_mock_batch(self, plan: PreviewPlan, stop_after: JournalState | None = None) -> str:
         self._raise_if_plan_has_unresolved_work(plan.id)
@@ -117,12 +155,21 @@ class JournalCoordinator:
         stop_after: JournalState | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
     ) -> str:
+        lock_assessment = self.reconcile_execution_lock()
+        if lock_assessment.blocks_apply:
+            raise JournalExecutionBlocked(
+                StructuredError(
+                    ErrorCode.RECOVERY_REQUIRED,
+                    Severity.RECOVERY,
+                    lock_assessment.message,
+                    {"lock_state": lock_assessment.state.value},
+                )
+            )
         self._raise_if_plan_has_unresolved_work(plan.id)
         self._raise_if_any_unresolved_real_work(plan.id)
         if not isinstance(self.executor, SameVolumeMoveExecutor):
             raise TypeError("execute_real_move_batch requires SameVolumeMoveExecutor.")
-        lock_owner = str(uuid.uuid4())
-        self._acquire_execution_lock(lock_owner)
+        lock_owner = self._acquire_execution_lock()
         batch_id = str(uuid.uuid4())
         approved_at = datetime.now(timezone.utc).isoformat()
         try:
@@ -160,7 +207,15 @@ class JournalCoordinator:
                     return batch_id
             return batch_id
         finally:
-            self._release_execution_lock(lock_owner)
+            if not self._release_execution_lock(lock_owner):
+                raise JournalExecutionBlocked(
+                    StructuredError(
+                        ErrorCode.RECOVERY_REQUIRED,
+                        Severity.RECOVERY,
+                        "FileFlow could not safely release its execution lock because ownership changed.",
+                        {"owner_token": lock_owner.token},
+                    )
+                )
 
     def _execute_one(self, batch_id: str, operation: PlannedOperation, stop_after: JournalState | None = None) -> bool:
         started_at = datetime.now(timezone.utc).isoformat()
@@ -656,12 +711,95 @@ class JournalCoordinator:
                 (JournalState.IN_PROGRESS.value, datetime.now(timezone.utc).isoformat(), batch_id),
             )
 
-    def _acquire_execution_lock(self, owner: str) -> None:
+    def reconcile_execution_lock(self) -> ExecutionLockAssessment:
+        row = self.database.connection.execute(
+            "SELECT owner, process_id, process_started_at FROM execution_lock WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return ExecutionLockAssessment(ExecutionLockState.NONE, "No execution lock is present.")
+        if row["process_id"] is None or not row["process_started_at"]:
+            return ExecutionLockAssessment(
+                ExecutionLockState.UNKNOWN_OWNER,
+                "FileFlow found an execution lock whose owner cannot be verified. Apply remains blocked.",
+            )
+
+        owner_state = self.process_probe.owner_state(int(row["process_id"]), str(row["process_started_at"]))
+        if owner_state == ProcessOwnerState.ALIVE:
+            return ExecutionLockAssessment(
+                ExecutionLockState.ACTIVE,
+                "Another confirmed FileFlow Apply is still active.",
+            )
+        if owner_state == ProcessOwnerState.UNKNOWN:
+            return ExecutionLockAssessment(
+                ExecutionLockState.UNKNOWN_OWNER,
+                "FileFlow cannot safely verify whether another Apply is still active. Apply remains blocked.",
+            )
+        if self.operations_requiring_recovery():
+            return ExecutionLockAssessment(
+                ExecutionLockState.UNRESOLVED_WORK,
+                "A previous move could not be fully verified. FileFlow has stopped further changes until it is reviewed.",
+            )
+
+        recoverable_states = tuple(state.value for state in self.state_machine.recoverable_states())
+        placeholders = ",".join("?" for _ in recoverable_states)
+        with self.database.connection:
+            cursor = self.database.connection.execute(
+                f"""
+                DELETE FROM execution_lock
+                WHERE id = 1
+                  AND owner = ?
+                  AND process_id = ?
+                  AND process_started_at = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM executed_operation
+                      WHERE result IN ({placeholders})
+                  )
+                """,
+                (
+                    row["owner"],
+                    int(row["process_id"]),
+                    str(row["process_started_at"]),
+                    *recoverable_states,
+                ),
+            )
+        if cursor.rowcount == 1:
+            return ExecutionLockAssessment(
+                ExecutionLockState.RECOVERED,
+                "A stale execution lock with no unresolved move work was safely cleared.",
+            )
+        return ExecutionLockAssessment(
+            ExecutionLockState.UNKNOWN_OWNER,
+            "The execution lock changed while FileFlow was checking it. Apply remains blocked.",
+        )
+
+    def _acquire_execution_lock(self) -> ExecutionLockOwner:
+        process_identity = self.process_probe.current_identity()
+        if process_identity is None:
+            raise JournalExecutionBlocked(
+                StructuredError(
+                    ErrorCode.RECOVERY_REQUIRED,
+                    Severity.RECOVERY,
+                    "FileFlow could not establish a safe process identity for this Apply.",
+                )
+            )
+        owner = ExecutionLockOwner(
+            str(uuid.uuid4()),
+            process_identity.process_id,
+            process_identity.process_started_at,
+        )
         try:
             with self.database.connection:
                 self.database.connection.execute(
-                    "INSERT INTO execution_lock(id, owner, acquired_at) VALUES (1, ?, ?)",
-                    (owner, datetime.now(timezone.utc).isoformat()),
+                    """
+                    INSERT INTO execution_lock(id, owner, acquired_at, process_id, process_started_at)
+                    VALUES (1, ?, ?, ?, ?)
+                    """,
+                    (
+                        owner.token,
+                        datetime.now(timezone.utc).isoformat(),
+                        owner.process_id,
+                        owner.process_started_at,
+                    ),
                 )
         except sqlite3.IntegrityError as exc:
             raise JournalExecutionBlocked(
@@ -669,13 +807,21 @@ class JournalCoordinator:
                     ErrorCode.RECOVERY_REQUIRED,
                     Severity.RECOVERY,
                     "Another FileFlow apply operation is already active.",
-                    {"owner": owner},
+                    {"owner": owner.token},
                 )
             ) from exc
+        return owner
 
-    def _release_execution_lock(self, owner: str) -> None:
+    def _release_execution_lock(self, owner: ExecutionLockOwner) -> bool:
         with self.database.connection:
-            self.database.connection.execute("DELETE FROM execution_lock WHERE id = 1 AND owner = ?", (owner,))
+            cursor = self.database.connection.execute(
+                """
+                DELETE FROM execution_lock
+                WHERE id = 1 AND owner = ? AND process_id = ? AND process_started_at = ?
+                """,
+                (owner.token, owner.process_id, owner.process_started_at),
+            )
+        return cursor.rowcount == 1
 
     def _raise_if_plan_has_unresolved_work(self, plan_id: str) -> None:
         unresolved = self.operations_requiring_recovery_for_plan(plan_id)

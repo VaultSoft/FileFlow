@@ -1,0 +1,201 @@
+import ntpath
+import sys
+import unittest
+from dataclasses import replace
+
+from fileflow.apply_controller import ApplyController, ApplyState
+from fileflow.journal import (
+    ExecutionLockState,
+    JournalCoordinator,
+    MockOperationExecutor,
+)
+from fileflow.models import (
+    FileIdentity,
+    IdentitySnapshot,
+    JournalState,
+    MetadataSnapshot,
+    SafetyDecision,
+    ScannedItem,
+    ScannedItemKind,
+)
+from fileflow.planner import PreviewPlanner
+from fileflow.process_identity import ProcessIdentity, ProcessOwnerState, WindowsProcessIdentityProbe
+from fileflow.rules import default_categories, default_rules
+from fileflow.safety import FakeIdentityProvider, FakeReparseInspector, PathChainSafety, WindowsPathPolicy
+from fileflow.storage import Database
+
+
+
+def snapshot(path, file_id=None, file_type="file"):
+    return IdentitySnapshot(
+        FileIdentity("VOL", file_id or path.casefold(), file_type, 1),
+        MetadataSnapshot(path, 100, 10, 5),
+    )
+
+
+class FakeProcessProbe:
+    def __init__(self, owner_state=ProcessOwnerState.ALIVE, identity=None):
+        self.state = owner_state
+        self.identity = identity or ProcessIdentity(4242, "111222333")
+
+    def current_identity(self):
+        return self.identity
+
+    def owner_state(self, process_id, process_started_at):
+        return self.state
+
+
+def make_plan():
+    policy = WindowsPathPolicy()
+    root = r"C:\FileFlowTest\Root"
+    source = r"C:\FileFlowTest\Root\doc.pdf"
+    identities = {
+        root: snapshot(root, "root", "directory"),
+        source: snapshot(source, "doc"),
+    }
+    item = ScannedItem(source, "doc.pdf", ScannedItemKind.FILE, SafetyDecision.safe(source), identities[source])
+    return PreviewPlanner(
+        policy,
+        PathChainSafety(policy, FakeReparseInspector()),
+        FakeIdentityProvider(identities),
+        entry_exists=lambda path: ntpath.splitext(ntpath.basename(policy.normalize(path)))[1] == "",
+    ).create_plan(
+        profile_id="default",
+        source_root=root,
+        destination_root=root,
+        items=(item,),
+        rules=default_rules(default_categories()),
+        categories=default_categories(),
+    )
+
+
+def insert_lock(db, *, owner="owner-token", process_id=4242, started_at="111222333"):
+    with db.connection:
+        db.connection.execute(
+            """
+            INSERT INTO execution_lock(id, owner, acquired_at, process_id, process_started_at)
+            VALUES (1, ?, '2026-01-01T00:00:00+00:00', ?, ?)
+            """,
+            (owner, process_id, started_at),
+        )
+
+
+class ExecutionLockTests(unittest.TestCase):
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.db.migrate()
+
+    def tearDown(self):
+        self.db.close()
+
+    def coordinator(self, owner_state=ProcessOwnerState.ALIVE):
+        return JournalCoordinator(
+            self.db,
+            MockOperationExecutor(),
+            process_probe=FakeProcessProbe(owner_state),
+        )
+
+    def test_live_owner_without_operation_rows_keeps_apply_blocked(self):
+        insert_lock(self.db)
+
+        result = self.coordinator(ProcessOwnerState.ALIVE).reconcile_execution_lock()
+
+        self.assertEqual(ExecutionLockState.ACTIVE, result.state)
+        self.assertTrue(result.blocks_apply)
+        self.assertEqual(1, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+
+    def test_dead_owner_without_unresolved_rows_is_safely_recovered(self):
+        insert_lock(self.db)
+
+        result = self.coordinator(ProcessOwnerState.DEAD).reconcile_execution_lock()
+
+        self.assertEqual(ExecutionLockState.RECOVERED, result.state)
+        self.assertFalse(result.blocks_apply)
+        self.assertEqual(0, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+
+    def test_dead_owner_with_each_unresolved_state_keeps_apply_blocked(self):
+        for state in (
+            JournalState.INTENT_RECORDED,
+            JournalState.IN_PROGRESS,
+            JournalState.VERIFYING,
+            JournalState.RECOVERY_REQUIRED,
+        ):
+            with self.subTest(state=state):
+                db = Database(":memory:")
+                db.migrate()
+                try:
+                    coordinator = JournalCoordinator(db, MockOperationExecutor())
+                    batch_id = coordinator.execute_mock_batch(
+                        make_plan(),
+                        stop_after=JournalState.INTENT_RECORDED if state == JournalState.RECOVERY_REQUIRED else state,
+                    )
+                    if state == JournalState.RECOVERY_REQUIRED:
+                        coordinator.mark_recovery_required_for_batch(batch_id)
+                    insert_lock(db)
+
+                    result = JournalCoordinator(
+                        db,
+                        MockOperationExecutor(),
+                        process_probe=FakeProcessProbe(ProcessOwnerState.DEAD),
+                    ).reconcile_execution_lock()
+
+                    self.assertEqual(ExecutionLockState.UNRESOLVED_WORK, result.state)
+                    self.assertTrue(result.blocks_apply)
+                    self.assertEqual(1, db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+                finally:
+                    db.close()
+
+    def test_unknown_or_legacy_owner_identity_fails_closed(self):
+        insert_lock(self.db)
+        result = self.coordinator(ProcessOwnerState.UNKNOWN).reconcile_execution_lock()
+        self.assertEqual(ExecutionLockState.UNKNOWN_OWNER, result.state)
+        self.assertTrue(result.blocks_apply)
+
+        with self.db.connection:
+            self.db.connection.execute("DELETE FROM execution_lock")
+            self.db.connection.execute(
+                "INSERT INTO execution_lock(id, owner, acquired_at) VALUES (1, 'legacy', 'old')"
+            )
+        legacy = self.coordinator(ProcessOwnerState.DEAD).reconcile_execution_lock()
+        self.assertEqual(ExecutionLockState.UNKNOWN_OWNER, legacy.state)
+
+    def test_only_exact_owner_identity_can_release_lock(self):
+        coordinator = self.coordinator(ProcessOwnerState.ALIVE)
+        owner = coordinator._acquire_execution_lock()
+
+        self.assertFalse(coordinator._release_execution_lock(replace(owner, token="different-token")))
+        self.assertFalse(coordinator._release_execution_lock(replace(owner, process_started_at="reused-pid")))
+        self.assertEqual(1, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+        self.assertTrue(coordinator._release_execution_lock(owner))
+        self.assertEqual(0, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+
+    def test_apply_readiness_recovers_dead_empty_lock(self):
+        insert_lock(self.db)
+        controller = ApplyController(
+            self.db,
+            process_probe=FakeProcessProbe(ProcessOwnerState.DEAD),
+        )
+
+        readiness = controller.readiness(None)
+
+        self.assertEqual(ApplyState.NO_PREVIEW, readiness.state)
+        self.assertEqual(0, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process identity integration")
+    def test_windows_probe_distinguishes_live_owner_from_reused_pid_identity(self):
+        probe = WindowsProcessIdentityProbe()
+        identity = probe.current_identity()
+
+        self.assertIsNotNone(identity)
+        self.assertEqual(
+            ProcessOwnerState.ALIVE,
+            probe.owner_state(identity.process_id, identity.process_started_at),
+        )
+        self.assertEqual(
+            ProcessOwnerState.DEAD,
+            probe.owner_state(identity.process_id, identity.process_started_at + "-different"),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

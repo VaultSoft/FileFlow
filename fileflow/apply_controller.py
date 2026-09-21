@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from .journal import JournalCoordinator, JournalExecutionBlocked
+from .journal import ExecutionLockState, JournalCoordinator, JournalExecutionBlocked
 from .models import (
     ErrorCode,
     JournalState,
@@ -18,6 +18,7 @@ from .models import (
     StructuredError,
 )
 from .operations.same_volume_move import SameVolumeMoveExecutor
+from .process_identity import ProcessIdentityProbe
 from .preview_workflow import PreviewWorkflowService
 from .storage import Database
 
@@ -53,6 +54,8 @@ class ApplyConfirmationSummary:
     total_bytes: int
     source_folder: str
     category_summary: tuple[tuple[str, int], ...]
+    blocked_count: int
+    unsupported_count: int
     non_actionable_count: int
     message: str
 
@@ -76,21 +79,28 @@ class ApplyController:
         *,
         preview_service: PreviewWorkflowService | None = None,
         executor_factory: Callable[[], SameVolumeMoveExecutor] | None = None,
+        process_probe: ProcessIdentityProbe | None = None,
     ):
         self.database = database
         self.preview_service = preview_service or PreviewWorkflowService()
         self.executor_factory = executor_factory or SameVolumeMoveExecutor
+        self.process_probe = process_probe
         self._active = False
         self._consumed_plan_ids: set[str] = set()
 
     def readiness(self, plan: PreviewPlan | None, *, already_applying: bool = False) -> ApplyReadiness:
+        coordinator = self._coordinator()
+        lock_assessment = coordinator.reconcile_execution_lock()
+        if lock_assessment.blocks_apply:
+            state = ApplyState.APPLYING if lock_assessment.state == ExecutionLockState.ACTIVE else ApplyState.RECOVERY_REQUIRED
+            return ApplyReadiness(state, False, lock_assessment.message)
         if plan is None:
             return ApplyReadiness(ApplyState.NO_PREVIEW, False, "Analyse a folder before applying.")
         if already_applying or self._active:
             return ApplyReadiness(ApplyState.APPLYING, False, "FileFlow is already moving files.")
         if plan.id in self._consumed_plan_ids:
             return ApplyReadiness(ApplyState.PREVIEW_STALE, False, "Analyse again before moving more files.")
-        unresolved = JournalCoordinator(self.database, self.executor_factory()).operations_requiring_recovery()
+        unresolved = coordinator.operations_requiring_recovery()
         if unresolved:
             return ApplyReadiness(
                 ApplyState.RECOVERY_REQUIRED,
@@ -142,13 +152,17 @@ class ApplyController:
             if operation.source_identity is not None:
                 total_bytes += operation.source_identity.metadata.size
         non_actionable = len(plan.operations) - len(operations)
+        blocked_count = sum(1 for operation in plan.operations if operation.safety_status == PlannedOperationStatus.BLOCKED)
+        unsupported_count = sum(1 for operation in plan.operations if operation.safety_status == PlannedOperationStatus.UNSUPPORTED)
         return ApplyConfirmationSummary(
             len(operations),
             total_bytes,
             plan.source_root,
             tuple(sorted(categories.items())),
+            blocked_count,
+            unsupported_count,
             non_actionable,
-            "FileFlow will move these files to the exact destinations shown in Preview.",
+            "FileFlow will move these files to the exact destinations shown in Preview. Existing destinations will not be overwritten.",
         )
 
     def validate_before_confirmation(self, plan: PreviewPlan) -> ApplyReadiness:
@@ -176,7 +190,7 @@ class ApplyController:
         executable_plan = _plan_with_operations(plan, operations)
         self._active = True
         try:
-            coordinator = JournalCoordinator(self.database, self.executor_factory())
+            coordinator = self._coordinator()
             batch_id = coordinator.execute_real_move_batch(executable_plan, progress_callback=progress_callback)
             summary = coordinator.batch_summary(batch_id)
             self._consumed_plan_ids.add(plan.id)
@@ -215,10 +229,23 @@ class ApplyController:
         return self.apply_confirmed(plan, progress_callback=progress_callback)
 
     def history_rows(self):
-        return JournalCoordinator(self.database, self.executor_factory()).list_batches()
+        return self._coordinator().list_batches()
+
+    def history_operations(self, batch_id: str):
+        return self._coordinator().list_batch_operations(batch_id)
 
     def operations_requiring_recovery(self):
-        return JournalCoordinator(self.database, self.executor_factory()).operations_requiring_recovery()
+        return self._coordinator().operations_requiring_recovery()
+
+    def execution_lock_status(self):
+        return self._coordinator().reconcile_execution_lock()
+
+    def _coordinator(self) -> JournalCoordinator:
+        return JournalCoordinator(
+            self.database,
+            self.executor_factory(),
+            process_probe=self.process_probe,
+        )
 
 
 def actionable_operations(plan: PreviewPlan) -> tuple[PlannedOperation, ...]:

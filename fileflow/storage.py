@@ -137,6 +137,14 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         );
         """,
     ),
+    (
+        3,
+        "execution_lock_process_identity",
+        """
+        ALTER TABLE execution_lock ADD COLUMN process_id INTEGER;
+        ALTER TABLE execution_lock ADD COLUMN process_started_at TEXT;
+        """,
+    ),
 )
 
 
