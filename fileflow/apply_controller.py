@@ -162,14 +162,15 @@ class ApplyController:
             blocked_count,
             unsupported_count,
             non_actionable,
-            "FileFlow will move these files to the exact destinations shown in Preview. Existing destinations will not be overwritten.",
+            "FileFlow will move only the ready files to the exact destinations shown in Preview. Blocked preview rows will not be moved, and existing destinations will not be overwritten.",
         )
 
     def validate_before_confirmation(self, plan: PreviewPlan) -> ApplyReadiness:
         readiness = self.readiness(plan)
         if not readiness.can_apply:
             return readiness
-        result = self.preview_service.revalidate_plan(plan)
+        executable_plan = _plan_with_operations(plan, actionable_operations(plan))
+        result = self.preview_service.revalidate_plan(executable_plan)
         if result.status == RevalidationStatus.STALE:
             return ApplyReadiness(ApplyState.PREVIEW_STALE, False, "The folder changed after this preview was created. Analyse again before moving files.")
         if result.status == RevalidationStatus.BLOCKED:
@@ -196,7 +197,7 @@ class ApplyController:
             self._consumed_plan_ids.add(plan.id)
             if summary is None:
                 return ApplyResult(ApplyState.COMPLETE, batch_id, "Move batch finished, but summary could not be loaded.")
-            result = _result_from_summary(summary)
+            result = _result_from_summary(summary, excluded_blocked=readiness.blocked_count)
             if result.recovery_required:
                 return ApplyResult(
                     ApplyState.RECOVERY_REQUIRED,
@@ -265,11 +266,11 @@ def _plan_with_operations(plan: PreviewPlan, operations: tuple[PlannedOperation,
     return replace(plan, operations=operations)
 
 
-def _result_from_summary(summary) -> ApplyResult:
+def _result_from_summary(summary, *, excluded_blocked: int = 0) -> ApplyResult:
     attempted = int(summary["attempted_count"] or 0)
     succeeded = int(summary["succeeded_count"] or 0)
     failed = int(summary["failed_count"] or 0)
-    blocked = int(summary["blocked_count"] or 0)
+    blocked = int(summary["blocked_count"] or 0) + excluded_blocked
     recovery = int(summary["recovery_count"] or 0)
     status = summary["status"]
     state = ApplyState.RECOVERY_REQUIRED if status in (JournalState.RECOVERY_REQUIRED.value, JournalState.INTERRUPTED.value) else ApplyState.COMPLETE

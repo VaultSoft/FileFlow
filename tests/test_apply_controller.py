@@ -137,6 +137,73 @@ class ApplyControllerTests(unittest.TestCase):
                 db.close()
 
     @require_windows
+    def test_known_blocked_collision_is_excluded_while_ready_file_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            documents = root / "Documents"
+            documents.mkdir()
+            (root / "ok.pdf").write_text("ready", encoding="utf-8")
+            (root / "clash.pdf").write_text("source", encoding="utf-8")
+            (documents / "clash.pdf").write_text("existing", encoding="utf-8")
+            plan = PreviewWorkflowService().analyse_folder(str(root)).plan
+            self.assertIsNotNone(plan)
+            db = Database(":memory:")
+            db.migrate()
+            controller = ApplyController(db)
+            confirmations = []
+            try:
+                result = controller.confirm_and_apply(
+                    plan,
+                    lambda summary: confirmations.append(summary) or True,
+                )
+
+                self.assertEqual(ApplyState.COMPLETE, result.state)
+                self.assertEqual(1, len(confirmations))
+                self.assertEqual(1, confirmations[0].operation_count)
+                self.assertEqual(1, confirmations[0].blocked_count)
+                self.assertIn("Blocked preview rows will not be moved", confirmations[0].message)
+                self.assertEqual(1, result.succeeded)
+                self.assertEqual(1, result.blocked)
+                self.assertFalse((root / "ok.pdf").exists())
+                self.assertEqual("ready", (documents / "ok.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("source", (root / "clash.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("existing", (documents / "clash.pdf").read_text(encoding="utf-8"))
+            finally:
+                db.close()
+
+    @require_windows
+    def test_actionable_file_becoming_stale_after_confirmation_still_blocks_mixed_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            documents = root / "Documents"
+            documents.mkdir()
+            (root / "ok.pdf").write_text("ready", encoding="utf-8")
+            (root / "clash.pdf").write_text("source", encoding="utf-8")
+            (documents / "clash.pdf").write_text("existing", encoding="utf-8")
+            plan = PreviewWorkflowService().analyse_folder(str(root)).plan
+            self.assertIsNotNone(plan)
+            db = Database(":memory:")
+            db.migrate()
+            controller = ApplyController(db)
+
+            def make_actionable_destination_stale(summary):
+                self.assertEqual(1, summary.operation_count)
+                (documents / "ok.pdf").write_text("late collision", encoding="utf-8")
+                return True
+
+            try:
+                result = controller.confirm_and_apply(plan, make_actionable_destination_stale)
+
+                self.assertEqual(ApplyState.PREVIEW_STALE, result.state)
+                self.assertEqual("ready", (root / "ok.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("late collision", (documents / "ok.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("source", (root / "clash.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("existing", (documents / "clash.pdf").read_text(encoding="utf-8"))
+                self.assertEqual(0, len(controller.history_rows()))
+            finally:
+                db.close()
+
+    @require_windows
     def test_multiple_successful_moves_and_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -172,6 +172,7 @@ class JournalCoordinator:
         lock_owner = self._acquire_execution_lock()
         batch_id = str(uuid.uuid4())
         approved_at = datetime.now(timezone.utc).isoformat()
+        execution_error: BaseException | None = None
         try:
             summary_json = json.dumps(
                 {
@@ -206,9 +207,12 @@ class JournalCoordinator:
                 if row is not None and row["result"] in (JournalState.INTERRUPTED.value, JournalState.RECOVERY_REQUIRED.value):
                     return batch_id
             return batch_id
+        except BaseException as exc:
+            execution_error = exc
+            raise
         finally:
             if not self._release_execution_lock(lock_owner):
-                raise JournalExecutionBlocked(
+                release_error = JournalExecutionBlocked(
                     StructuredError(
                         ErrorCode.RECOVERY_REQUIRED,
                         Severity.RECOVERY,
@@ -216,6 +220,10 @@ class JournalCoordinator:
                         {"owner_token": lock_owner.token},
                     )
                 )
+                if execution_error is None:
+                    raise release_error
+                execution_error.add_note(release_error.error.message)
+                execution_error.lock_release_error = release_error
 
     def _execute_one(self, batch_id: str, operation: PlannedOperation, stop_after: JournalState | None = None) -> bool:
         started_at = datetime.now(timezone.utc).isoformat()
@@ -727,7 +735,7 @@ class JournalCoordinator:
         if owner_state == ProcessOwnerState.ALIVE:
             return ExecutionLockAssessment(
                 ExecutionLockState.ACTIVE,
-                "Another confirmed FileFlow Apply is still active.",
+                "FileFlow is currently applying a plan.",
             )
         if owner_state == ProcessOwnerState.UNKNOWN:
             return ExecutionLockAssessment(

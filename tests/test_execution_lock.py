@@ -1,4 +1,5 @@
 import ntpath
+import subprocess
 import sys
 import unittest
 from dataclasses import replace
@@ -19,7 +20,14 @@ from fileflow.models import (
     ScannedItemKind,
 )
 from fileflow.planner import PreviewPlanner
-from fileflow.process_identity import ProcessIdentity, ProcessOwnerState, WindowsProcessIdentityProbe
+from fileflow.operations.same_volume_move import SameVolumeMoveExecutor
+from fileflow.process_identity import (
+    ProcessIdentity,
+    ProcessOwnerState,
+    ProcessQueryResult,
+    ProcessQueryState,
+    WindowsProcessIdentityProbe,
+)
 from fileflow.rules import default_categories, default_rules
 from fileflow.safety import FakeIdentityProvider, FakeReparseInspector, PathChainSafety, WindowsPathPolicy
 from fileflow.storage import Database
@@ -195,6 +203,73 @@ class ExecutionLockTests(unittest.TestCase):
             ProcessOwnerState.DEAD,
             probe.owner_state(identity.process_id, identity.process_started_at + "-different"),
         )
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process identity integration")
+    def test_windows_probe_reports_exited_process_dead_while_handle_remains_open(self):
+        probe = WindowsProcessIdentityProbe()
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(0.2)"],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            query = probe.process_query(process.pid)
+            self.assertEqual(ProcessQueryState.ACTIVE, query.state)
+            self.assertIsNotNone(query.process_started_at)
+            process.wait(timeout=5)
+
+            self.assertEqual(
+                ProcessOwnerState.DEAD,
+                probe.owner_state(process.pid, query.process_started_at),
+            )
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)
+
+    def test_exit_code_query_failure_is_unknown(self):
+        probe = WindowsProcessIdentityProbe(
+            process_query=lambda process_id: ProcessQueryResult(
+                ProcessQueryState.UNKNOWN,
+                reason="exit_code_query_failed",
+            )
+        )
+        self.assertEqual(ProcessOwnerState.UNKNOWN, probe.owner_state(10, "started"))
+
+    def test_access_denied_process_query_is_unknown(self):
+        probe = WindowsProcessIdentityProbe(
+            process_query=lambda process_id: ProcessQueryResult(
+                ProcessQueryState.UNKNOWN,
+                reason="open_process_failed:5",
+            )
+        )
+        self.assertEqual(ProcessOwnerState.UNKNOWN, probe.owner_state(10, "started"))
+
+    def test_injected_live_and_reused_pid_decisions_retain_start_time_guard(self):
+        probe = WindowsProcessIdentityProbe(
+            process_query=lambda process_id: ProcessQueryResult(ProcessQueryState.ACTIVE, "actual-start")
+        )
+        self.assertEqual(ProcessOwnerState.ALIVE, probe.owner_state(10, "actual-start"))
+        self.assertEqual(ProcessOwnerState.DEAD, probe.owner_state(10, "old-start"))
+
+    def test_original_execution_error_is_preserved_when_lock_release_also_fails(self):
+        coordinator = JournalCoordinator(
+            self.db,
+            SameVolumeMoveExecutor(),
+            process_probe=FakeProcessProbe(ProcessOwnerState.ALIVE),
+        )
+
+        def fail_start(batch_id):
+            raise RuntimeError("original execution failure")
+
+        coordinator._mark_batch_started = fail_start
+        coordinator._release_execution_lock = lambda owner: False
+
+        with self.assertRaisesRegex(RuntimeError, "original execution failure") as captured:
+            coordinator.execute_real_move_batch(make_plan())
+
+        self.assertTrue(hasattr(captured.exception, "lock_release_error"))
+        self.assertIn("could not safely release", str(captured.exception.lock_release_error))
+        self.assertTrue(any("could not safely release" in note for note in captured.exception.__notes__))
 
 
 if __name__ == "__main__":
