@@ -1,19 +1,17 @@
-# Undo and Journal Model
+# Undo Journal
 
-Undo is part of the design before file execution exists. FileFlow should use SQLite for durable history, operation results, and undo eligibility.
+Undo history is append-only and separate from Apply history. Original
+`preview_plan`, `planned_operation`, `operation_batch`, `executed_operation`,
+and state-event rows are immutable evidence. Undo must never rewrite them.
 
-## Journal Goals
+The existing `executed_operation.undo_eligible` and `undo_status` columns are
+legacy placeholders from the initial schema. Future Undo code must not update
+or trust them as authoritative state. Eligibility and current Undo status are
+derived from the original execution plus linked Undo records.
 
-- Every approved batch has a durable record.
-- Every attempted operation has a durable result.
-- Undo eligibility is explicit, not assumed.
-- Partial failures are represented accurately.
-- Undo never overwrites user data.
-- FileFlow can explain why an operation cannot be undone.
+## Lifecycle
 
-## Crash-Aware States
-
-Operation lifecycle:
+The Undo journal uses these states across its plan, batch, and execution records:
 
 - `PLANNED`
 - `APPROVED`
@@ -22,125 +20,187 @@ Operation lifecycle:
 - `VERIFYING`
 - `SUCCEEDED`
 - `FAILED`
-- `BLOCKED`
 - `INTERRUPTED`
 - `RECOVERY_REQUIRED`
 
-Undo lifecycle:
+`VALID`, `STALE`, and `BLOCKED` belong to Undo planning and revalidation, not to
+the mutation lifecycle. No execution row is created for an operation blocked at
+preview or either pre-execution revalidation.
 
-- `UNDO_PLANNED`
-- `UNDO_APPROVED`
-- `UNDO_INTENT_RECORDED`
-- `UNDO_IN_PROGRESS`
-- `UNDO_VERIFYING`
-- `UNDO_SUCCEEDED`
-- `UNDO_FAILED`
-- `UNDO_BLOCKED`
-- `UNDO_INTERRUPTED`
-- `UNDO_RECOVERY_REQUIRED`
+`PLANNED` describes the persisted journal intent before approval and `APPROVED`
+describes the confirmed batch. A persisted `undo_execution` begins at
+`INTENT_RECORDED`, carrying the exact data approved by the user.
 
-Filesystem operations and SQLite cannot be made atomic together. Future real apply and undo must record intent and commit it before touching the filesystem, then verify and commit the final result afterward.
+Allowed execution transitions are:
 
-Startup recovery rule: any batch or operation left in an in-progress state is not automatically marked succeeded or failed. It becomes `RECOVERY_REQUIRED` and must be inspected against filesystem identity and state before any conclusion.
+```text
+PLANNED -> APPROVED
+APPROVED -> INTENT_RECORDED
+INTENT_RECORDED -> IN_PROGRESS | RECOVERY_REQUIRED
+IN_PROGRESS -> VERIFYING | FAILED | INTERRUPTED | RECOVERY_REQUIRED
+VERIFYING -> SUCCEEDED | FAILED | RECOVERY_REQUIRED
+INTERRUPTED -> RECOVERY_REQUIRED
+```
 
-## Batch Record
+Terminal `SUCCEEDED` and `FAILED` states do not transition. An ambiguous error
+can never be reduced to `FAILED`; it is `RECOVERY_REQUIRED`.
 
-Each applied batch should store:
+Every update uses a guarded expected-state predicate. If exactly one expected
+row is not updated, the coordinator stops, marks the scope for recovery where
+possible, and performs no further mutation.
 
-- batch ID
-- plan ID
-- profile ID
-- source root
-- destination root
-- created timestamp
-- approved timestamp
-- started timestamp
-- completed timestamp
-- app version
-- safety policy version
-- rule set version
-- category mapping version
-- status: `APPROVED`, `APPLYING`, `COMPLETED`, `COMPLETED_WITH_FAILURES`, `ABORTED`, `INTERRUPTED`, `RECOVERY_REQUIRED`
-- operation counts by status
+## Durable Ordering
 
-## Executed Operation Record
+The future controller must use this order:
 
-Each executed operation should store:
+1. Persist the immutable UndoPlan.
+2. Perform first revalidation.
+3. Show safe-default confirmation.
+4. On explicit confirmation, pass the global mutation-safety gate and acquire
+   the singleton execution lock.
+5. Perform second revalidation while holding that lock.
+6. Persist and commit an `undo_batch` in `APPROVED` state.
+7. For each operation, insert its exact paths and expected identity as an
+   `undo_execution` in `INTENT_RECORDED`; append an event; commit.
+8. Guard-transition to `IN_PROGRESS`; append an event; commit.
+9. Perform a final no-follow identity, path-chain, occupancy, cloud, and volume
+   check.
+10. Invoke the one reviewed same-volume rename primitive.
+11. Guard-transition to `VERIFYING`; append an event; commit.
+12. Verify the old location is absent and the restore destination contains the
+    expected identity.
+13. Guard-transition to `SUCCEEDED`, `FAILED`, or `RECOVERY_REQUIRED`; append an
+    event; commit.
+14. Refresh the batch summary and release the owned global lock.
 
-- operation ID
-- batch ID
-- planned operation ID
-- operation type
-- source path before operation
-- destination path
-- source metadata before operation
-- destination metadata after operation
-- file identity before operation
-- file identity after operation
-- size before and after
-- timestamps before and after
-- result: `SUCCEEDED`, `FAILED`, `SKIPPED`, `STALE`, `BLOCKED`
-- structured error code if any
-- error detail text for display
-- undo eligibility
-- undo status
-- undo attempted timestamp
-- undo result error code if any
+The intent commit must happen before the rename. A crash between rename and the
+`VERIFYING` commit leaves `IN_PROGRESS`, which is deliberately recoverable.
 
-Identity fields use `FileIdentity`, not path metadata alone. Metadata snapshots are stored separately from identity.
+## Append-Only Migration Proposal
 
-## Undo Eligibility
+Do not edit migrations 1 through 3. Add the Undo schema as migration 4 if 4 is
+still the next available version when implementation begins; otherwise use the
+next unused version.
 
-An operation is undo-eligible when:
+### undo_plan
 
-- it completed successfully
-- it was a move or rename
-- destination still exists
-- destination identity matches the post-apply identity
-- original source path does not exist
-- original source parent exists and is safe
-- restoring would not cross unsafe reparse points
-- restoring would not overwrite any file or directory
-- destination has not materially changed since apply
+- `id TEXT PRIMARY KEY`
+- `original_batch_id TEXT NOT NULL`
+- `original_plan_id TEXT NOT NULL`
+- `status TEXT NOT NULL`
+- `safety_policy_version INTEGER NOT NULL`
+- `behavior_snapshot_json TEXT NOT NULL`
+- `summary_json TEXT NOT NULL`
+- `snapshot_json TEXT NOT NULL`
+- `created_at TEXT NOT NULL`
+- `first_revalidated_at TEXT`
+- `second_revalidated_at TEXT`
 
-An operation is not undo-eligible when:
+Indexes: `(original_batch_id, created_at)` and `(status, created_at)`.
 
-- original location is occupied
-- destination file was modified, replaced, or moved
-- source or destination volume changed unexpectedly
-- destination no longer exists
-- source/destination path chain now includes unsafe redirects
-- original parent is missing and cannot be safely recreated
-- restoring would exceed path/name constraints
-- operation was not completed
-- user manually changed the file after apply
+### undo_planned_operation
 
-## Undo Apply Contract
+- `id TEXT PRIMARY KEY`
+- `undo_plan_id TEXT NOT NULL`
+- `original_plan_id TEXT NOT NULL`
+- `original_batch_id TEXT NOT NULL`
+- `original_planned_operation_id TEXT NOT NULL`
+- `original_execution_id TEXT NOT NULL`
+- `source_path TEXT NOT NULL`
+- `restore_path TEXT NOT NULL`
+- `expected_identity_json TEXT NOT NULL`
+- `preview_metadata_json TEXT NOT NULL`
+- `status TEXT NOT NULL`
+- `reason_code TEXT`
+- `reason_detail TEXT`
+- `snapshot_json TEXT NOT NULL`
+- `preview_index INTEGER NOT NULL`
 
-Undo is itself a planned operation batch:
+Indexes: `(undo_plan_id, preview_index)`, `(original_execution_id)`, and
+`(undo_plan_id, status)`.
 
-1. User opens history and selects a batch.
-2. FileFlow evaluates undo eligibility for each successful operation.
-3. FileFlow previews exact reverse operations.
-4. User approves undo.
-5. FileFlow revalidates immediately before undo.
-6. FileFlow records undo results per operation.
+### undo_batch
 
-Undo must never silently choose a different restoration path. If the original path is occupied, the operation is blocked or requires a new user decision in a future advanced flow.
+- `id TEXT PRIMARY KEY`
+- `undo_plan_id TEXT NOT NULL`
+- `original_batch_id TEXT NOT NULL`
+- `status TEXT NOT NULL`
+- `approved_at TEXT NOT NULL`
+- `started_at TEXT`
+- `completed_at TEXT`
+- `app_version TEXT NOT NULL`
+- `summary_json TEXT NOT NULL`
+- `recovery_required INTEGER NOT NULL DEFAULT 0`
 
-## Cross-Volume Considerations
+Indexes: `(original_batch_id, approved_at)` and `(status, started_at)`.
 
-Cross-volume real moves are not supported in the first real-operation milestone. They should be represented as `UNSUPPORTED` until the future design proves copy, verification, source removal, interruption handling, and recovery.
+### undo_execution
 
-Future cross-volume undo is only safe when the journal proves:
+- `id TEXT PRIMARY KEY`
+- `undo_batch_id TEXT NOT NULL`
+- `undo_planned_operation_id TEXT NOT NULL`
+- `original_execution_id TEXT NOT NULL`
+- `source_before TEXT NOT NULL`
+- `restore_destination TEXT NOT NULL`
+- `expected_identity_json TEXT NOT NULL`
+- `identity_before_json TEXT NOT NULL`
+- `identity_after_json TEXT`
+- `metadata_before_json TEXT NOT NULL`
+- `metadata_after_json TEXT`
+- `state TEXT NOT NULL`
+- `error_code TEXT`
+- `error_detail TEXT`
+- `started_at TEXT NOT NULL`
+- `completed_at TEXT`
 
-- the destination copy was verified
-- the source removal completed
-- destination identity still matches
-- original location is still safe and empty
+Indexes: `(undo_batch_id, state)`, `(original_execution_id, started_at)`, and
+`(state, started_at)`.
 
-Interrupted cross-volume moves should be recorded as partial failures with enough detail to avoid pretending undo is available.
+### undo_state_event
 
-## Retention
+- `id TEXT PRIMARY KEY`
+- `undo_execution_id TEXT NOT NULL`
+- `undo_batch_id TEXT NOT NULL`
+- `state TEXT NOT NULL`
+- `created_at TEXT NOT NULL`
 
-The journal should not store file contents. It stores metadata, paths, outcomes, and fingerprints. If a future backup/staging feature is added, it must have explicit retention settings, size limits, and user-visible storage location.
+Index: `(undo_execution_id, created_at)`.
+
+Foreign-key relationships should be declared where compatible with FileFlow's
+database configuration, but runtime lookups must still fail closed if linked
+rows are absent or inconsistent.
+
+## Duplicate Prevention
+
+The database and coordinator both enforce repeat protection:
+
+- a partial unique index permits at most one `SUCCEEDED` Undo execution for an
+  `original_execution_id`
+- a partial unique index permits at most one active or unresolved Undo execution
+  for an original execution
+- a transaction rechecks both constraints immediately before batch approval
+- a failed uniqueness check aborts the batch before intent is recorded
+
+Terminal, proven no-mutation failures may remain as history and do not prevent a
+fresh plan. `INTERRUPTED` and `RECOVERY_REQUIRED` always prevent another attempt.
+
+## Batch Accounting
+
+Undo batch summaries record candidate, valid, blocked, attempted, succeeded,
+failed, interrupted, and recovery-required counts separately. Byte totals count
+only verified successful operations and use the metadata observed for those
+executions. Blocked preview rows are not reported as attempted.
+
+History joins Undo records to their original Apply plan, batch, and execution.
+It never infers success from a missing source or from a batch-level status alone.
+
+## Global Mutation Gate
+
+Apply and Undo use the same singleton execution lock and the same preflight gate.
+The gate blocks any real mutation when either journal contains
+`INTENT_RECORDED`, `IN_PROGRESS`, `VERIFYING`, `INTERRUPTED`, or
+`RECOVERY_REQUIRED`, or when lock ownership is active or cannot be proven stale.
+
+A stale lock may be cleared only when its owner is proved dead and neither Apply
+nor Undo has unresolved work. Preview, Undo Preview, History, and read-only
+recovery inspection remain available while mutation is blocked.

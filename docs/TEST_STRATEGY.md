@@ -62,6 +62,10 @@ Undo:
 - unsafe restore parent
 - partial batch undo
 
+The authoritative Undo design is in `UNDO_MODEL.md`, `UNDO_SAFETY.md`,
+`UNDO_JOURNAL.md`, `UNDO_RECOVERY.md`, and `UNDO_UX.md`. The detailed future
+acceptance matrix appears below.
+
 Database:
 
 - migrations apply in order
@@ -181,3 +185,138 @@ Milestone 1 cannot be considered complete without these tests.
 - placeholder is not hashed or hydrated
 
 Use injectable/testable filesystem abstractions for Windows-specific conditions that cannot be reliably created everywhere.
+
+## Future Undo Acceptance Matrix
+
+All real-filesystem cases use dedicated temporary directories only. Windows
+reparse, cloud, identity, occupancy, lock, and rename behavior must also be
+injectable so CI can prove fail-closed decisions without touching user data.
+
+### Eligibility and Frozen Paths
+
+- only a verified `SUCCEEDED` same-volume FileFlow move is a candidate
+- failed, blocked, interrupted, recovery-required, and unsupported Apply rows
+  are never Undo candidates
+- exact source is the persisted Apply destination
+- exact restore destination is the persisted Apply source
+- current rules and categories are never consulted to reconstruct paths
+- missing or inconsistent original plan, batch, or execution links block
+- a consumed execution with successful Undo cannot produce another UndoPlan
+- a terminal proven no-mutation failure requires a fresh plan before retry
+- a manually renamed or moved file blocks; no identity discovery scan occurs
+
+### Identity and Edited Files
+
+- matching post-Apply `FileIdentity` is eligible
+- replacement at the same filename with a different identity blocks
+- unavailable or partially supported identity blocks
+- changed file type blocks
+- unsupported or changed hard-link state blocks
+- content, size, and timestamp edits with unchanged identity remain eligible
+- edited-file preview warns that only location is restored
+- no test or UI claims that Undo restores earlier contents
+
+### Occupancy, Paths, and Reparse State
+
+- free original pathname is eligible
+- ordinary file at original path blocks
+- directory at original path blocks
+- dangling symlink at original path blocks
+- junction, mount point, or other reparse entry at original path blocks
+- unknown occupancy state blocks
+- case-equivalent sibling collision blocks
+- missing restore parent blocks and no directory is created
+- original source root redirect blocks
+- Apply destination root redirect blocks
+- nested redirect in either chain blocks
+- destination file becoming a reparse entry blocks
+- reparse inspection failure blocks
+- unsafe or changed root identity blocks
+- cloud placeholder, unsupported cloud state, and cloud inspection failure block
+- current source and restore parent volume mismatch blocks
+- inability to prove same volume blocks
+
+### Revalidation and Confirmation
+
+- first revalidation runs before confirmation
+- stale first revalidation prevents confirmation
+- Cancel is the default action
+- close and Escape cancel
+- Enter does not implicitly confirm
+- only explicit affirmative input reaches second revalidation
+- second revalidation runs after confirmation while the global lock is held
+- source identity change between revalidations blocks without mutation
+- original path occupancy between revalidations blocks without mutation
+- stale or blocked operation invalidates the frozen set; no silent omission
+- repeated or double activation creates no second Undo batch
+
+### Execution and Verification
+
+- intent is durably committed before reverse rename
+- crash after reverse rename but before `VERIFYING` is classified through
+  recovery and is never replayed automatically
+- state updates use guarded expected-state transitions
+- exact frozen paths are passed to the shared rename primitive
+- no overwrite, replace, auto-rename, copy, delete, or mkdir occurs
+- verification requires old location absent and restore identity matching
+- failed verification becomes recovery required, not success
+- a proven no-mutation ordinary failure can allow an unrelated operation to run
+- operation 1 interruption or recovery required prevents operation 2
+- successful-byte totals include only verified successes
+- blocked, failed, interrupted, and recovery counts remain distinct
+
+### Partial Batches and History
+
+- 10 successful, 2 failed, and 1 blocked Apply result shows all outcomes
+- if only 7 successful moves remain eligible, preview shows 7 valid and 3
+  blocked successful moves with reasons
+- failed and blocked Apply operations are visible but never marked undoable
+- successful partial Undo persists each operation result
+- original Apply records remain byte-for-byte unchanged
+- Undo history persists across database close and reopen
+- History links each Undo execution to its original Apply execution
+- successful Undo prevents duplicate Undo after restart
+- Apply A-to-B, Undo B-to-A, and new Apply A-to-B remain distinct chains
+- no executable Redo or Undo-of-Undo path exists
+
+### Global Mutation Gate
+
+- active Apply blocks Undo
+- active Undo blocks Apply
+- unresolved Apply blocks Undo
+- unresolved Undo blocks Apply
+- unknown lock owner blocks both
+- dead lock owner is cleared only when neither journal has unresolved work
+- preview, History, and read-only recovery remain available during lockout
+
+### Crash Recovery
+
+- A: expected identity at B and A absent classifies likely not undone
+- A with wrong identity at B classifies conflict
+- B: B absent and expected identity at A classifies likely completed
+- C: both paths occupied classifies conflict
+- D: both paths absent classifies missing/recovery required
+- E: A occupied by wrong identity classifies conflict
+- occupancy or identity inspection error remains unresolved
+- recovery inspection never calls the mutation primitive
+- recovery inspection never automatically marks success or replays Undo
+
+### Database Migration
+
+- existing migrations retain exact definitions
+- new Undo migration applies after all existing migrations
+- migration is idempotently skipped after it is recorded
+- old databases upgrade without rewriting Apply rows
+- new installs receive the same schema through ordered migrations
+- uniqueness constraints reject duplicate successful or active Undo executions
+
+### Packaged GUI
+
+- Undo remains absent or disabled until deliberately enabled
+- persisted History opens in the packaged application
+- Undo Preview shows exact current and restore paths
+- blocked reasons and edited-file warnings render without truncation
+- confirmation safely defaults to Cancel
+- packaged close and Escape paths cancel
+- no automatic move occurs when opening History or Undo Preview
+- a stale second revalidation returns to preview without mutation

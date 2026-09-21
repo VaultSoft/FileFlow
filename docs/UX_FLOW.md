@@ -111,6 +111,9 @@ Elements:
 
 Purpose: preview and apply reverse operations.
 
+The authoritative Milestone 3A interaction and confirmation contract is in
+`UNDO_UX.md`. This section remains a high-level navigation summary.
+
 Elements:
 
 - selected batch

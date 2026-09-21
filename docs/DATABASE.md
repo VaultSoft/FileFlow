@@ -29,7 +29,13 @@ Use coherent operation states across plan, batch, execution, and undo tables:
 - `INTERRUPTED`
 - `RECOVERY_REQUIRED`
 
-Undo uses corresponding `UNDO_*` states.
+Undo is modeled by separate append-only plan, batch, execution, and state-event
+records linked to immutable Apply history. See `UNDO_JOURNAL.md` for the
+authoritative Milestone 3A schema and state model.
+
+Migrations are append-only. Never edit the SQL of a migration that may already
+have run. The proposed Undo schema must be a new migration using the next unused
+version.
 
 SQLite and filesystem operations cannot be atomic together. Future execution must use this journal ordering:
 
@@ -168,7 +174,7 @@ Indexes: `(status, started_at)`, `(profile_id, started_at)`.
 
 Indexes: `(batch_id, result)`, `(undo_status, completed_at)`.
 
-### undo_attempt
+### undo_attempt (superseded design sketch)
 
 - `id TEXT PRIMARY KEY`
 - `batch_id TEXT NOT NULL`
@@ -177,7 +183,7 @@ Indexes: `(batch_id, result)`, `(undo_status, completed_at)`.
 - `completed_at TEXT`
 - `summary_json TEXT NOT NULL`
 
-### undo_operation
+### undo_operation (superseded design sketch)
 
 - `id TEXT PRIMARY KEY`
 - `undo_attempt_id TEXT NOT NULL`
@@ -189,6 +195,10 @@ Indexes: `(batch_id, result)`, `(undo_status, completed_at)`.
 - `error_detail TEXT`
 
 Index: `(undo_attempt_id, result)`.
+
+These two early sketch tables have not been implemented. They are superseded by
+the linked `undo_plan`, `undo_planned_operation`, `undo_batch`,
+`undo_execution`, and `undo_state_event` proposal in `UNDO_JOURNAL.md`.
 
 ### error_event
 
