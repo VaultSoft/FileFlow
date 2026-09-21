@@ -49,20 +49,44 @@ def mutation_violations(source_text: str, *, filename: str = "<source>") -> list
                     if alias.name == "Path":
                         path_aliases.add(alias.asname or alias.name)
 
-    violations: list[str] = []
+    def mutation_reference(node):
+        if not isinstance(node, ast.Attribute):
+            return None
+        owner = None
+        if isinstance(node.value, ast.Name):
+            owner_name = node.value.id
+            if owner_name in module_aliases:
+                owner = module_aliases[owner_name]
+            elif owner_name in path_aliases:
+                owner = "Path"
+        elif isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name):
+            if node.value.func.id in path_aliases:
+                owner = "Path"
+        mutation = (owner, node.attr)
+        return mutation if mutation in MUTATING_ATTRIBUTES else None
+
+    # Capture callable extraction such as ``f = os.replace`` before looking
+    # for calls through the alias. The reference itself is also a violation.
+    assigned_references: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        mutation = mutation_reference(value)
+        if mutation is None:
+            continue
+        assigned_references.append(mutation)
+        targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+        for target in targets:
+            if isinstance(target, ast.Name):
+                direct_mutation_aliases[target.id] = mutation
+
+    violations: list[str] = [f"{owner}.{attr}" for owner, attr in assigned_references]
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            owner = None
-            if isinstance(node.func.value, ast.Name):
-                owner_name = node.func.value.id
-                if owner_name in module_aliases:
-                    owner = module_aliases[owner_name]
-                elif owner_name in path_aliases:
-                    owner = "Path"
-            elif isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Name):
-                if node.func.value.func.id in path_aliases:
-                    owner = "Path"
-            if (owner, node.func.attr) in MUTATING_ATTRIBUTES:
+            mutation = mutation_reference(node.func)
+            if mutation is not None:
+                owner, attr = mutation
                 violations.append(f"{owner}.{node.func.attr}")
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in direct_mutation_aliases:
@@ -111,6 +135,29 @@ WinPath("a").unlink()
         self.assertIn("os.remove", violations)
         self.assertIn("os.rename", violations)
         self.assertIn("Path.unlink", violations)
+
+    def test_mutation_boundary_checker_catches_extracted_callable_aliases(self):
+        text = """
+import os
+import shutil
+from pathlib import Path
+
+replace_file = os.replace
+copy_file = shutil.copy2
+unlink_path = Path.unlink
+bound_unlink = Path("a").unlink
+
+replace_file("a", "b")
+copy_file("a", "b")
+unlink_path(Path("a"))
+bound_unlink()
+"""
+
+        violations = mutation_violations(text)
+
+        self.assertIn("os.replace", violations)
+        self.assertIn("shutil.copy2", violations)
+        self.assertGreaterEqual(violations.count("Path.unlink"), 2)
 
     def test_build_script_is_allowed_only_outside_runtime_package(self):
         self.assertTrue((Path(__file__).resolve().parents[1] / "build.py").exists())
