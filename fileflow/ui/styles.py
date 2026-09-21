@@ -51,6 +51,13 @@ QLabel#sectionTitle {
 QLabel#muted {
     color: #5d6b7a;
 }
+QLabel#recoveryWarning {
+    color: #6b4600;
+    background: #fff4cf;
+    border: 1px solid #e4bd58;
+    border-radius: 5px;
+    padding: 9px;
+}
 QFrame#summaryStrip {
     background: #ffffff;
     border: 1px solid #d8dee8;

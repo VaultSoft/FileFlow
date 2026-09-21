@@ -45,7 +45,7 @@ class PreviewAnalysis:
 
 
 class PreviewWorkflowService:
-    """Coordinates safe preview-only FileFlow analysis.
+    """Coordinates safe FileFlow analysis and frozen preview creation.
 
     This service owns no mutation primitive. It validates a selected root,
     scans immediate children, and asks the planner to build a frozen preview.

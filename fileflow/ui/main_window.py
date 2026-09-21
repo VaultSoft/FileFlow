@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtWidgets import (
     QFileDialog,
@@ -47,6 +49,7 @@ class MainWindow(QMainWindow):
         self.apply_thread: QThread | None = None
         self.apply_worker: ApplyWorker | None = None
         self.apply_state = ApplyState.NO_PREVIEW
+        self.history_rows_by_id = {}
 
         self.setWindowTitle(APP_NAME)
         self.resize(1120, 720)
@@ -76,7 +79,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.preview_page)
         self.pages.addWidget(self.history_page)
         self.pages.addWidget(self._placeholder_page("Rules", "Built-in rules are active. Editing rules is deferred."))
-        self.pages.addWidget(self._placeholder_page("Settings", "Settings are intentionally minimal while FileFlow remains preview-only."))
+        self.pages.addWidget(self._placeholder_page("Settings", "Settings are intentionally minimal while controlled same-volume moves are being refined."))
 
         self.setCentralWidget(root)
 
@@ -89,10 +92,20 @@ class MainWindow(QMainWindow):
         self.title.setObjectName("headline")
         layout.addWidget(self.title)
 
-        intro = QLabel("Select a folder, analyse immediate child files, and preview what FileFlow would do. Nothing is changed in this version.")
+        intro = QLabel("FileFlow analyses your folder first and shows an exact preview before any files are moved.")
         intro.setObjectName("muted")
         intro.setWordWrap(True)
         layout.addWidget(intro)
+
+        workflow = QLabel("1  Choose Folder     2  Analyse     3  Review Preview     4  Apply     5  View Result / History")
+        workflow.setObjectName("sectionTitle")
+        workflow.setWordWrap(True)
+        layout.addWidget(workflow)
+
+        limits = QLabel("Current limits: immediate files only, same-volume moves only, no overwrite, and a maximum of 100 moves per Apply.")
+        limits.setObjectName("muted")
+        limits.setWordWrap(True)
+        layout.addWidget(limits)
 
         top = QHBoxLayout()
         self.folder_label = QLabel("No folder selected")
@@ -101,7 +114,7 @@ class MainWindow(QMainWindow):
         self.folder_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(self.folder_label, 1)
 
-        self.select_button = QPushButton("Select Folder")
+        self.select_button = QPushButton("Choose Folder")
         self.select_button.clicked.connect(self.select_folder)
         top.addWidget(self.select_button)
 
@@ -161,13 +174,13 @@ class MainWindow(QMainWindow):
         self.validate_button.setEnabled(False)
         actions.addWidget(self.validate_button)
 
-        self.reanalyse_button = QPushButton("Re-analyse")
+        self.reanalyse_button = QPushButton("Analyse Again")
         self.reanalyse_button.setObjectName("secondaryButton")
         self.reanalyse_button.clicked.connect(self.start_analysis)
         self.reanalyse_button.setEnabled(False)
         actions.addWidget(self.reanalyse_button)
 
-        self.apply_button = QPushButton("Apply - available in a later milestone")
+        self.apply_button = QPushButton("Apply")
         self.apply_button.clicked.connect(self.start_apply)
         self.apply_button.setEnabled(False)
         actions.addWidget(self.apply_button)
@@ -187,14 +200,16 @@ class MainWindow(QMainWindow):
         self.recovery_banner.setWordWrap(True)
         layout.addWidget(self.recovery_banner)
         self.history_table = QTableWidget(0, 7)
-        self.history_table.setHorizontalHeaderLabels(("Time", "Source", "Ops", "Moved", "Failed", "Recovery", "Status"))
+        self.history_table.setHorizontalHeaderLabels(("Date / Time", "Source Folder", "Operations", "Moved", "Failed", "Recovery", "Status"))
         self.history_table.horizontalHeader().setStretchLastSection(True)
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.history_table.itemSelectionChanged.connect(self._show_history_detail)
         layout.addWidget(self.history_table, 1)
         self.history_detail = QTextEdit()
         self.history_detail.setReadOnly(True)
         self.history_detail.setMinimumHeight(120)
+        self.history_detail.setPlainText("Select a history row to view its read-only details.")
         layout.addWidget(self.history_detail)
         return page
 
@@ -370,9 +385,16 @@ class MainWindow(QMainWindow):
             f"Total data: {format_bytes(summary.total_bytes)}",
             f"Source folder: {summary.source_folder}",
             "Categories: " + ", ".join(f"{name}: {count}" for name, count in summary.category_summary),
+            "Files will be moved, not copied.",
+            "FileFlow will not overwrite existing destination files.",
         ]
-        if summary.non_actionable_count:
-            message.append(f"Non-actionable preview rows: {summary.non_actionable_count}")
+        if summary.blocked_count:
+            message.append(f"Blocked preview rows not included: {summary.blocked_count}")
+        if summary.unsupported_count:
+            message.append(f"Unsupported preview rows not included: {summary.unsupported_count}")
+        other_non_actionable = summary.non_actionable_count - summary.blocked_count - summary.unsupported_count
+        if other_non_actionable:
+            message.append(f"Other non-actionable preview rows not included: {other_non_actionable}")
         box = QMessageBox(self)
         box.setWindowTitle("Move files?")
         box.setText("\n".join(message))
@@ -390,7 +412,7 @@ class MainWindow(QMainWindow):
         self.apply_state = result.state
         self.status_label.setText(result.message)
         self.detail.setPlainText(
-            f"Attempted: {result.attempted}\nMoved: {result.succeeded}\nFailed safely: {result.failed}\nBlocked: {result.blocked}\nRecovery required: {result.recovery_required}"
+            f"Moved: {result.succeeded}\nFailed safely: {result.failed}\nBlocked: {result.blocked}\nRecovery required: {result.recovery_required}\n\nChoose Analyse Again to create a fresh preview."
         )
         self._refresh_history()
 
@@ -424,14 +446,17 @@ class MainWindow(QMainWindow):
             self.apply_button.setText("Apply")
         else:
             self.apply_button.setText("Apply")
+        if plan is None and readiness.state in (ApplyState.APPLYING, ApplyState.RECOVERY_REQUIRED):
+            self.status_label.setText(readiness.message)
 
     def _refresh_history(self) -> None:
         rows = self.apply_controller.history_rows()
+        self.history_rows_by_id = {row["id"]: row for row in rows}
         self.history_table.setRowCount(0)
         for row_index, row in enumerate(rows):
             self.history_table.insertRow(row_index)
             values = (
-                row["started_at"] or row["approved_at"],
+                format_history_time(row["started_at"] or row["approved_at"]),
                 batch_source_folder(row),
                 str(row["attempted_count"] or 0),
                 str(row["succeeded_count"] or 0),
@@ -440,15 +465,57 @@ class MainWindow(QMainWindow):
                 row["status"],
             )
             for column, value in enumerate(values):
-                self.history_table.setItem(row_index, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row["id"])
+                self.history_table.setItem(row_index, column, item)
         unresolved = self.apply_controller.operations_requiring_recovery()
         if unresolved:
             first = unresolved[0]
+            self.recovery_banner.setObjectName("recoveryWarning")
+            self.recovery_banner.style().unpolish(self.recovery_banner)
+            self.recovery_banner.style().polish(self.recovery_banner)
             self.recovery_banner.setText(
-                f"A previous move needs recovery review. Source: {first['source_before']} Destination: {first['destination'] or ''}"
+                "A previous move could not be fully verified. FileFlow has stopped further changes until the operation is reviewed. "
+                f"Source: {first['source_before']} Destination: {first['destination'] or ''} State: {first['result']}"
             )
         else:
-            self.recovery_banner.setText("No recovery review is currently required.")
+            lock_status = self.apply_controller.execution_lock_status()
+            if lock_status.blocks_apply:
+                self.recovery_banner.setObjectName("recoveryWarning")
+                self.recovery_banner.setText(lock_status.message)
+            else:
+                self.recovery_banner.setObjectName("muted")
+                self.recovery_banner.setText("No recovery review is currently required.")
+            self.recovery_banner.style().unpolish(self.recovery_banner)
+            self.recovery_banner.style().polish(self.recovery_banner)
+
+    def _show_history_detail(self) -> None:
+        selected = self.history_table.selectedItems()
+        if not selected:
+            return
+        first_item = self.history_table.item(selected[0].row(), 0)
+        batch_id = first_item.data(Qt.ItemDataRole.UserRole) if first_item is not None else None
+        row = self.history_rows_by_id.get(batch_id)
+        if row is None:
+            return
+        operations = self.apply_controller.history_operations(batch_id)
+        lines = [
+            f"Date / time: {format_history_time(row['started_at'] or row['approved_at'])}",
+            f"Source folder: {batch_source_folder(row)}",
+            f"Status: {row['status']}",
+            f"Operations: {row['attempted_count'] or 0}",
+            f"Moved: {row['succeeded_count'] or 0}",
+            f"Failed safely: {row['failed_count'] or 0}",
+            f"Recovery required: {row['recovery_count'] or 0}",
+        ]
+        if operations:
+            lines.append("")
+            lines.extend(
+                f"{operation['result']}: {operation['source_before']} -> {operation['destination'] or ''}"
+                for operation in operations
+            )
+        self.history_detail.setPlainText("\n".join(lines))
 
 
 def format_row_detail(row: PreviewRow) -> str:
@@ -465,3 +532,12 @@ def format_row_detail(row: PreviewRow) -> str:
         f"Details: {row.detail}",
     ]
     return "\n".join(parts)
+
+
+def format_history_time(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return value

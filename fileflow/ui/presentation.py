@@ -173,7 +173,7 @@ def operation_detail(operation: PlannedOperation) -> str:
     if operation.structured_error:
         return structured_error_text(operation.structured_error)
     if operation.safety_status == PlannedOperationStatus.PLANNED:
-        return "Ready for preview only. FileFlow will not apply changes in this milestone."
+        return "Ready. FileFlow can move this file after the preview is checked and confirmed."
     return operation.reason
 
 
@@ -201,7 +201,7 @@ def present_revalidation(result: RevalidationResult) -> StalePresentation:
         return StalePresentation(
             result.status.value,
             "Preview is current",
-            "This preview still matches the selected folder. Nothing has been applied.",
+            "This preview still matches the selected folder and is ready for your review.",
             (),
         )
     title = "Preview is out of date" if result.status == RevalidationStatus.STALE else "Preview is blocked"
