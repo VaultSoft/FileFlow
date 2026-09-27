@@ -929,6 +929,7 @@ class MainWindow(QMainWindow):
         self.current_undo_plan = None
         self.undo_table.setRowCount(0)
         self.confirm_undo_button.setEnabled(False)
+        self.confirm_undo_button.setText("Undo Ready Files")
         self._set_banner(
             self.undo_summary_label,
             "Choose Preview Undo to re-check exact file identities and restore paths. No files move during preview.",
@@ -1073,15 +1074,16 @@ class MainWindow(QMainWindow):
 
     def _undo_finished(self, result: UndoResult) -> None:
         tone = "danger" if result.recovery_required else "success" if result.succeeded else "warning"
-        self._set_banner(self.undo_summary_label, result.message, tone)
         self.confirm_undo_button.setEnabled(False)
         self.current_undo_plan = None
+        # Refresh first: reselecting the history row resets the Undo banner.
         self._refresh_history()
+        self._set_banner(self.undo_summary_label, result.message, tone)
 
     def _undo_failed(self, error: StructuredError) -> None:
-        self._set_banner(self.undo_summary_label, structured_error_text(error), "danger")
         self.confirm_undo_button.setEnabled(False)
         self._refresh_history()
+        self._set_banner(self.undo_summary_label, structured_error_text(error), "danger")
 
     def _undo_worker_finished(self) -> None:
         if self.undo_worker is not None:
@@ -1092,7 +1094,11 @@ class MainWindow(QMainWindow):
         self.undo_thread = None
         self.undo_progress.setVisible(False)
         self._refresh_apply_state()
+        # Refreshing the detail resets the Undo banner; keep the result the user just got.
+        result_text = self.undo_summary_label.text()
+        result_tone = self.undo_summary_label.property("tone") or "neutral"
         self._show_history_detail()
+        self._set_banner(self.undo_summary_label, result_text, result_tone)
 
     def _selected_history_batch_id(self) -> str | None:
         selected = self.history_table.selectedItems()
