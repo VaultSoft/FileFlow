@@ -16,6 +16,7 @@ BUILD_DIR = ROOT / "build"
 APP_DIST = DIST_DIR / APP_NAME
 PORTABLE_ZIP = DIST_DIR / f"{APP_NAME}_v{VERSION}_Portable.zip"
 ICON = ROOT / "icon.ico"  # rendered from fileflow/ui/branding.py by make_icon.py
+LICENCE_FILES = ("LICENSE", "THIRD_PARTY_NOTICES.md")  # plus the LICENSES folder
 QT_BIN = Path(PyQt6.__file__).resolve().parent / "Qt6" / "bin"
 QT_ROOT_DLLS = ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll")
 
@@ -63,6 +64,11 @@ def main() -> int:
 
     for stale_icu in APP_DIST.glob("icu*.dll"):
         stale_icu.unlink()
+
+    # GPL-3.0 and Qt's LGPL-3.0 require the licence texts to travel with the binaries.
+    for notice in LICENCE_FILES:
+        shutil.copy2(ROOT / notice, APP_DIST / notice)
+    shutil.copytree(ROOT / "LICENSES", APP_DIST / "LICENSES")
 
     shutil.make_archive(str(PORTABLE_ZIP.with_suffix("")), "zip", root_dir=DIST_DIR, base_dir=APP_NAME)
     if not PORTABLE_ZIP.exists():

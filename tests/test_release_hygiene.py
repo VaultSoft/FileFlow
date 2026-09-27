@@ -28,6 +28,11 @@ class ReleaseHygieneTests(unittest.TestCase):
         self.assertIn("GPL-3.0-only", notices)
         self.assertIn("LGPL-3.0", notices)
 
+    def test_build_ships_the_licence_texts_in_the_zip(self):
+        build = (ROOT / "build.py").read_text(encoding="utf-8")
+        self.assertIn('LICENCE_FILES = ("LICENSE", "THIRD_PARTY_NOTICES.md")', build)
+        self.assertIn('shutil.copytree(ROOT / "LICENSES", APP_DIST / "LICENSES")', build)
+
     def test_no_developer_profile_paths_in_the_repository(self):
         hits = []
         for path in _text_files():
