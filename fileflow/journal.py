@@ -178,6 +178,8 @@ class JournalCoordinator:
         approved_at = datetime.now(timezone.utc).isoformat()
         execution_error: BaseException | None = None
         try:
+            self._raise_if_plan_has_unresolved_work(plan.id)
+            self._raise_if_any_unresolved_real_work(plan.id)
             summary_json = json.dumps(
                 {
                     "source_root": plan.source_root,

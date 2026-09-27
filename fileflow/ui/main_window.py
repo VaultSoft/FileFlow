@@ -41,7 +41,7 @@ from ..undo import UndoController, UndoControllerState, UndoPlan, UndoResult
 from ..workers.apply_worker import ApplyWorker
 from ..workers.preview_worker import PreviewWorker
 from ..workers.undo_worker import UndoWorker
-from .presentation import PreviewPresentation, PreviewRow, format_bytes, present_analysis, present_revalidation, structured_error_text
+from .presentation import PreviewPresentation, PreviewRow, format_bytes, present_analysis, structured_error_text
 from .styles import APP_STYLESHEET
 
 
@@ -194,6 +194,13 @@ class MainWindow(QMainWindow):
         self.status_label.setProperty("tone", "neutral")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        self.missing_folders_banner = QLabel("")
+        self.missing_folders_banner.setObjectName("statusBanner")
+        self.missing_folders_banner.setProperty("tone", "warning")
+        self.missing_folders_banner.setWordWrap(True)
+        self.missing_folders_banner.setVisible(False)
+        layout.addWidget(self.missing_folders_banner)
 
         self.preview_progress = QProgressBar()
         self.preview_progress.setRange(0, 1)
@@ -390,7 +397,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         heading, body = self._page_heading(
             "Rules",
-            "Built-in extension rules are deterministic and read-only in this release candidate. Preview always shows the exact result before Apply.",
+            "Built-in extension rules are deterministic and read-only. Preview always shows the exact result before Apply.",
         )
         layout.addWidget(heading)
         layout.addWidget(body)
@@ -460,7 +467,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         heading, body = self._page_heading(
             "Settings & Safety",
-            "FileFlow keeps its release-candidate behavior intentionally narrow. These boundaries are fixed, not hidden preferences.",
+            "FileFlow keeps its behavior intentionally narrow. These safety boundaries are fixed, not hidden preferences.",
         )
         layout.addWidget(heading)
         layout.addWidget(body)
@@ -472,10 +479,11 @@ class MainWindow(QMainWindow):
         boundaries = (
             ("Scan scope", "Immediate child files only; folders are never traversed."),
             ("Move scope", "Same-volume moves only, using the exact Preview destination."),
+            ("Destination folders", "Category folders such as Documents and Images must already exist. FileFlow never creates them."),
             ("Collision policy", "Existing or case-equivalent destinations are blocked; no overwrite or auto-rename."),
             ("Undo", "Location-only restore after identity and original-path checks."),
             ("Recovery", "Read-only evidence; FileFlow never retries or repairs automatically."),
-            ("Batch limit", "A maximum of 100 ready operations; larger plans are blocked, never truncated."),
+            ("Batch limit", "FileFlow supports up to 100 real operations per Apply or Undo. Larger plans are blocked, never truncated."),
         )
         for row_index, (name, detail) in enumerate(boundaries):
             name_label = QLabel(name)
@@ -539,6 +547,7 @@ class MainWindow(QMainWindow):
         self.validate_button.setEnabled(False)
         self.current_analysis = None
         self.current_presentation = None
+        self.missing_folders_banner.setVisible(False)
         self.apply_state = ApplyState.NO_PREVIEW
         self._refresh_apply_state()
 
@@ -615,6 +624,18 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row_index, column, item)
         tone = "success" if summary.ready else "warning" if presentation.rows else "neutral"
         self._set_banner(self.status_label, presentation.validation_message, tone)
+        if presentation.missing_destination_folders:
+            folder_list = "\n".join(presentation.missing_destination_folders)
+            self._set_banner(
+                self.missing_folders_banner,
+                "Some destination folders are missing:\n"
+                f"{folder_list}\n\n"
+                "Create these folders inside the selected folder, then Analyse Again.",
+                "warning",
+            )
+            self.missing_folders_banner.setVisible(True)
+        else:
+            self.missing_folders_banner.setVisible(False)
         self._filter_preview_rows()
         self._refresh_apply_state()
         if presentation.rows:
@@ -657,20 +678,20 @@ class MainWindow(QMainWindow):
     def validate_preview(self) -> None:
         if self.current_analysis is None or self.current_analysis.plan is None:
             return
-        result = self.service.revalidate_plan(self.current_analysis.plan)
-        presentation = present_revalidation(result)
-        lines = [presentation.title, presentation.message]
-        if presentation.reasons:
-            lines.append("")
-            lines.extend(f"- {reason}" for reason in presentation.reasons)
-        self._set_banner(
-            self.status_label,
-            f"{presentation.title}. {presentation.message}",
-            "success" if presentation.status == "VALID" else "warning",
-        )
-        self.detail.setPlainText("\n".join(lines))
-        self.reanalyse_button.setEnabled(self.selected_folder is not None and presentation.status != "VALID")
-        self.apply_state = ApplyState.PREVIEW_VALID if presentation.status == "VALID" else ApplyState.PREVIEW_STALE
+        readiness = self.apply_controller.validate_before_confirmation(self.current_analysis.plan)
+        if readiness.can_apply:
+            blocked = readiness.blocked_count + readiness.unsupported_count
+            message = f"Preview is current. {readiness.ready_count} ready, {blocked} blocked."
+            detail = "Only Ready rows are actionable. Blocked and unsupported rows will not be moved."
+            tone = "success"
+        else:
+            message = readiness.message
+            detail = "This preview cannot be applied. Review the message above, then Analyse Again if the folder changed."
+            tone = "warning"
+        self._set_banner(self.status_label, message, tone)
+        self.detail.setPlainText(detail)
+        self.reanalyse_button.setEnabled(self.selected_folder is not None)
+        self.apply_state = readiness.state
         self._refresh_apply_state()
 
     def start_apply(self) -> None:

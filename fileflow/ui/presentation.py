@@ -59,6 +59,7 @@ class PreviewPresentation:
     summary: PreviewSummary
     validation_message: str
     can_apply: bool
+    missing_destination_folders: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ SAFETY_REASON_TEXT = {
     SafetyReason.RELATIVE_PATH: "FileFlow needs a normal absolute Windows folder path.",
     SafetyReason.DRIVE_RELATIVE: "Drive-relative paths are not supported.",
     SafetyReason.FILESYSTEM_ROOT: "Filesystem roots cannot be analysed.",
-    SafetyReason.UNC_PATH: "Network share paths are not supported in this milestone.",
+    SafetyReason.UNC_PATH: "Network share paths are not supported.",
     SafetyReason.EXTENDED_PATH: "Extended-length Windows paths are not supported yet.",
     SafetyReason.ADS_SYNTAX: "Alternate data stream syntax is not supported.",
     SafetyReason.TRAILING_DOT: "A path component ends with a period, which is unsafe on Windows.",
@@ -83,7 +84,7 @@ SAFETY_REASON_TEXT = {
     SafetyReason.RESERVED_DEVICE_NAME: "A path component uses a reserved Windows device name.",
     SafetyReason.INVALID_NAME: "A path component contains characters Windows cannot safely handle.",
     SafetyReason.AMBIGUOUS_NORMALIZATION: "The path uses ambiguous Unicode or dot-segment normalization.",
-    SafetyReason.UNSUPPORTED_LONG_PATH: "The path is longer than FileFlow supports in this milestone.",
+    SafetyReason.UNSUPPORTED_LONG_PATH: "The path is longer than FileFlow supports.",
     SafetyReason.PATH_ESCAPE: "The path would escape the selected folder.",
     SafetyReason.CASE_EQUIVALENT_COLLISION: "This destination collides under Windows case-insensitive matching.",
     SafetyReason.PROTECTED_ROOT: "This is a protected Windows or profile location.",
@@ -94,8 +95,8 @@ SAFETY_REASON_TEXT = {
     SafetyReason.IDENTITY_UNAVAILABLE: "FileFlow could not establish a stable Windows identity for this item.",
     SafetyReason.SOURCE_MISSING: "The source file is no longer available.",
     SafetyReason.DESTINATION_EXISTS: "The planned destination already exists.",
-    SafetyReason.DESTINATION_PARENT_MISSING: "The destination folder does not exist yet.",
-    SafetyReason.DIRECTORY_SKIPPED: "Subdirectories are shown but not analysed in this milestone.",
+    SafetyReason.DESTINATION_PARENT_MISSING: "The destination category folder does not exist. FileFlow never creates destination folders.",
+    SafetyReason.DIRECTORY_SKIPPED: "Subdirectories are shown but not analysed.",
     SafetyReason.NO_MATCHING_RULE: "No enabled rule matched this file.",
     SafetyReason.SCAN_FAILED: "FileFlow could not safely inspect this item.",
 }
@@ -136,8 +137,28 @@ def present_analysis(analysis: PreviewAnalysis) -> PreviewPresentation:
 
     rows = tuple(present_operation(operation) for operation in analysis.plan.operations)
     summary = summarize(analysis.scanned_items, rows)
-    message = safety_decision_text(analysis.validation.decision)
-    return PreviewPresentation(rows, summary, message, False)
+    message = preview_summary_text(summary)
+    missing_folders = tuple(
+        sorted(
+            {
+                str(operation.structured_error.details.get("folder_name"))
+                for operation in analysis.plan.operations
+                if operation.structured_error is not None
+                and operation.structured_error.code == ErrorCode.DESTINATION_PARENT_MISSING
+                and operation.structured_error.details.get("folder_name")
+            },
+            key=str.casefold,
+        )
+    )
+    return PreviewPresentation(rows, summary, message, False, missing_folders)
+
+
+def preview_summary_text(summary: PreviewSummary) -> str:
+    blocked = summary.blocked + summary.collisions
+    parts = [f"{summary.ready} ready", f"{blocked} blocked"]
+    if summary.unsupported:
+        parts.append(f"{summary.unsupported} unsupported")
+    return ", ".join(parts).capitalize() + "."
 
 
 def present_operation(operation: PlannedOperation) -> PreviewRow:

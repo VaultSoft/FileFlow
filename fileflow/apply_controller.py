@@ -126,7 +126,7 @@ class ApplyController:
             return ApplyReadiness(
                 ApplyState.PREVIEW_BLOCKED,
                 False,
-                f"This preview has {len(operations)} ready moves. The current development limit is {MAX_APPLY_OPERATIONS}.",
+                f"FileFlow supports up to {MAX_APPLY_OPERATIONS} moves per Apply. This preview has {len(operations)} ready moves.",
                 len(operations),
                 blocked_count,
                 unsupported_count,

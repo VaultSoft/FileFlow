@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fileflow.models import (
@@ -200,9 +202,58 @@ class PreviewUiTests(unittest.TestCase):
         text = " ".join(label.text() for label in window.settings_page.findChildren(QLabel))
         self.assertIn("Same-volume moves only", text)
         self.assertIn("no overwrite or auto-rename", text)
+        self.assertIn("must already exist", text)
         self.assertIn("Recovery", text)
         window.close()
         self.assertIsNotNone(app)
+
+    @unittest.skipUnless(os.name == "nt", "real Windows filesystem integration")
+    def test_validate_preview_uses_actionable_subset_and_lists_missing_folders(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from fileflow.apply_controller import ApplyState
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            documents = root / "Documents"
+            documents.mkdir()
+            (root / "ok.pdf").write_text("ready", encoding="utf-8")
+            (root / "clash.pdf").write_text("source", encoding="utf-8")
+            (root / "photo.jpg").write_text("image", encoding="utf-8")
+            (documents / "clash.pdf").write_text("existing", encoding="utf-8")
+            service = PreviewWorkflowService()
+            analysis = service.analyse_folder(str(root))
+            self.assertIsNotNone(analysis.plan)
+
+            app = QApplication.instance() or QApplication([])
+            window = MainWindow(service=service)
+            window.selected_folder = str(root)
+            window.current_analysis = analysis
+            window.current_presentation = present_analysis(analysis)
+            window.apply_state = ApplyState.PREVIEW_VALID
+            window._render_presentation(window.current_presentation)
+
+            self.assertFalse(window.missing_folders_banner.isHidden())
+            self.assertIn("Images", window.missing_folders_banner.text())
+            self.assertIn("Create these folders", window.missing_folders_banner.text())
+            self.assertEqual(3, window.table.rowCount())
+
+            window.validate_preview()
+
+            self.assertIn("Preview is current", window.status_label.text())
+            self.assertIn("1 ready, 2 blocked", window.status_label.text())
+            self.assertTrue(window.apply_button.isEnabled())
+            self.assertTrue(window.reanalyse_button.isEnabled())
+            self.assertEqual(2, window.current_presentation.summary.blocked + window.current_presentation.summary.collisions)
+            self.assertTrue((root / "ok.pdf").exists())
+            self.assertTrue((root / "photo.jpg").exists())
+            self.assertFalse((root / "Images").exists())
+            window.close()
+            self.assertIsNotNone(app)
 
     def test_apply_confirmation_defaults_and_escapes_to_cancel(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

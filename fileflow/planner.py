@@ -146,18 +146,24 @@ class PreviewPlanner:
                 preview_index += 1
                 continue
             if not parent_exists:
+                folder_name = ntpath.basename(destination_parent)
+                missing_parent_message = (
+                    f"The {folder_name} folder does not exist. FileFlow never creates destination folders. "
+                    "Create it, then Analyse Again."
+                )
                 operations.append(
                     self._blocked_operation(
                         item,
                         root_decision.normalized_path,
                         preview_index,
-                        reason="Planned destination parent does not exist.",
+                        reason=missing_parent_message,
                         destination_path=destination.normalized_path,
                         safety=SafetyDecision.block(
                             SafetyReason.DESTINATION_PARENT_MISSING,
-                            "Planned destination parent does not exist.",
+                            missing_parent_message,
                             normalized_path=destination_parent,
-                            code=ErrorCode.DESTINATION_UNSAFE,
+                            code=ErrorCode.DESTINATION_PARENT_MISSING,
+                            details={"path": destination_parent, "folder_name": folder_name},
                         ),
                     )
                 )

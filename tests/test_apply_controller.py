@@ -172,6 +172,41 @@ class ApplyControllerTests(unittest.TestCase):
                 db.close()
 
     @require_windows
+    def test_mixed_blocked_rows_do_not_invalidate_actionable_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            documents = root / "Documents"
+            documents.mkdir()
+            (root / "ok.pdf").write_text("ready", encoding="utf-8")
+            (root / "clash.pdf").write_text("source", encoding="utf-8")
+            (root / "photo.jpg").write_text("image", encoding="utf-8")
+            (documents / "clash.pdf").write_text("existing", encoding="utf-8")
+            plan = PreviewWorkflowService().analyse_folder(str(root)).plan
+            self.assertIsNotNone(plan)
+            db = Database(":memory:")
+            db.migrate()
+            controller = ApplyController(db)
+            try:
+                readiness = controller.validate_before_confirmation(plan)
+
+                self.assertTrue(readiness.can_apply)
+                self.assertEqual(1, readiness.ready_count)
+                self.assertEqual(2, readiness.blocked_count)
+
+                result = controller.confirm_and_apply(plan, lambda summary: True)
+
+                self.assertEqual(ApplyState.COMPLETE, result.state)
+                self.assertEqual(1, result.succeeded)
+                self.assertEqual(2, result.blocked)
+                self.assertEqual("ready", (documents / "ok.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("source", (root / "clash.pdf").read_text(encoding="utf-8"))
+                self.assertEqual("image", (root / "photo.jpg").read_text(encoding="utf-8"))
+                self.assertEqual("existing", (documents / "clash.pdf").read_text(encoding="utf-8"))
+                self.assertFalse((root / "Images").exists())
+            finally:
+                db.close()
+
+    @require_windows
     def test_actionable_file_becoming_stale_after_confirmation_still_blocks_mixed_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

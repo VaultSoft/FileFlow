@@ -738,6 +738,14 @@ class UndoJournalCoordinator:
         owner = self.lock_coordinator.acquire_mutation_lock()
         execution_error: BaseException | None = None
         try:
+            if self.lock_coordinator.all_operations_requiring_recovery():
+                raise JournalExecutionBlocked(
+                    StructuredError(
+                        ErrorCode.RECOVERY_REQUIRED,
+                        Severity.RECOVERY,
+                        "Unresolved Apply or Undo work must be reviewed before another mutation.",
+                    )
+                )
             validation = self.planner.revalidate(plan)
             if not validation.valid:
                 raise UndoPlanRejected(validation)

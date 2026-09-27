@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fileflow.apply_controller import ApplyController, ApplyState
-from fileflow.journal import JournalCoordinator
+from fileflow.journal import JournalCoordinator, JournalExecutionBlocked
 from fileflow.models import ErrorCode, FileIdentity, IdentitySnapshot, JournalState, Severity, StructuredError
 from fileflow.operations.same_volume_move import SameVolumeMoveExecutor
 from fileflow.preview_workflow import PreviewWorkflowService
@@ -70,6 +70,17 @@ class FailingExistingPathIdentityProvider:
                 ),
             )
         return self.inner.snapshot(logical_path)
+
+
+class RecoveryAppearsAfterLock:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.calls == 1:
+            return ()
+        return (object(),)
 
 
 class ThirdRootSnapshotChangesVolume:
@@ -534,6 +545,23 @@ class UndoIntegrationTests(unittest.TestCase):
 
 
 class UndoRecoveryTests(unittest.TestCase):
+    def test_undo_rechecks_unresolved_work_after_acquiring_lock(self):
+        db = Database(":memory:")
+        db.migrate()
+        try:
+            coordinator = UndoJournalCoordinator(db, UndoMoveExecutor())
+            recovery_check = RecoveryAppearsAfterLock()
+            coordinator.lock_coordinator.all_operations_requiring_recovery = recovery_check
+
+            with self.assertRaisesRegex(JournalExecutionBlocked, "Unresolved Apply or Undo work"):
+                coordinator.execute_batch(object())
+
+            self.assertEqual(2, recovery_check.calls)
+            self.assertEqual(0, db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+            self.assertEqual(0, db.connection.execute("SELECT COUNT(*) FROM undo_batch").fetchone()[0])
+        finally:
+            db.close()
+
     @require_windows
     def test_recovery_cases_likely_not_undone_and_likely_completed(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,9 +8,11 @@ from fileflow.apply_controller import ApplyController, ApplyState
 from fileflow.journal import (
     ExecutionLockState,
     JournalCoordinator,
+    JournalExecutionBlocked,
     MockOperationExecutor,
 )
 from fileflow.models import (
+    ErrorCode,
     FileIdentity,
     IdentitySnapshot,
     JournalState,
@@ -18,6 +20,8 @@ from fileflow.models import (
     SafetyDecision,
     ScannedItem,
     ScannedItemKind,
+    Severity,
+    StructuredError,
 )
 from fileflow.planner import PreviewPlanner
 from fileflow.operations.same_volume_move import SameVolumeMoveExecutor
@@ -270,6 +274,34 @@ class ExecutionLockTests(unittest.TestCase):
         self.assertTrue(hasattr(captured.exception, "lock_release_error"))
         self.assertIn("could not safely release", str(captured.exception.lock_release_error))
         self.assertTrue(any("could not safely release" in note for note in captured.exception.__notes__))
+
+    def test_apply_rechecks_unresolved_work_after_acquiring_lock(self):
+        coordinator = JournalCoordinator(
+            self.db,
+            SameVolumeMoveExecutor(),
+            process_probe=FakeProcessProbe(ProcessOwnerState.ALIVE),
+        )
+        calls = []
+
+        def unresolved_check(plan_id):
+            calls.append(plan_id)
+            if len(calls) == 2:
+                raise JournalExecutionBlocked(
+                    StructuredError(
+                        ErrorCode.RECOVERY_REQUIRED,
+                        Severity.RECOVERY,
+                        "Injected unresolved work after lock acquisition.",
+                    )
+                )
+
+        coordinator._raise_if_any_unresolved_real_work = unresolved_check
+
+        with self.assertRaisesRegex(JournalExecutionBlocked, "Injected unresolved work"):
+            coordinator.execute_real_move_batch(make_plan())
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual(0, self.db.connection.execute("SELECT COUNT(*) FROM execution_lock").fetchone()[0])
+        self.assertEqual(0, self.db.connection.execute("SELECT COUNT(*) FROM operation_batch").fetchone()[0])
 
 
 if __name__ == "__main__":

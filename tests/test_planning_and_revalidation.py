@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 
 from fileflow.models import (
+    ErrorCode,
     FileIdentity,
     IdentitySnapshot,
     MetadataSnapshot,
@@ -316,7 +317,10 @@ class PlanningTests(unittest.TestCase):
                 categories=default_categories(),
             )
             self.assertEqual(PlannedOperationStatus.BLOCKED, plan.operations[0].safety_status)
-            self.assertIn("parent does not exist", plan.operations[0].structured_error.message)
+            self.assertEqual(ErrorCode.DESTINATION_PARENT_MISSING, plan.operations[0].structured_error.code)
+            self.assertIn("The Images folder does not exist", plan.operations[0].structured_error.message)
+            self.assertIn("never creates destination folders", plan.operations[0].structured_error.message)
+            self.assertIn("Analyse Again", plan.operations[0].structured_error.message)
 
     def test_dangling_destination_entry_counts_as_occupied(self):
         root = r"C:\FileFlowTest\Root"
