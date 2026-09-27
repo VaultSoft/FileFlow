@@ -47,7 +47,7 @@ Rules:
 Collisions:
 
 - existing destination blocks
-- auto-rename is not available in Milestone 1
+- auto-rename is not available
 - apply detects destination created after preview
 - case-insensitive collision
 - case-only rename blocked
@@ -55,6 +55,8 @@ Collisions:
 Preview/apply:
 
 - plan contains exact source/destination/reason
+- missing destination category folder is visibly blocked with manual recovery guidance
+- a mixed Preview validates and applies only its Ready subset while retaining blocked rows
 - stale source missing
 - stale metadata changed
 - stale rule version changed
@@ -71,7 +73,7 @@ Undo:
 - partial batch undo
 
 The authoritative Undo design is in `UNDO_MODEL.md`, `UNDO_SAFETY.md`,
-`UNDO_JOURNAL.md`, `UNDO_RECOVERY.md`, and `UNDO_UX.md`. The detailed future
+`UNDO_JOURNAL.md`, `UNDO_RECOVERY.md`, and `UNDO_UX.md`. The detailed
 acceptance matrix appears below.
 
 Database:
@@ -103,18 +105,18 @@ Use injectable filesystem adapters for hard-to-create Windows states:
 
 ## CI
 
-Initial CI should run:
+CI and local release verification run:
 
 - unittest discovery
 - syntax/import checks
-- later, `python build.py`
-- portable ZIP output verification once packaging exists
+- `python build.py`
+- portable EXE and ZIP output verification
 
 CI must not run tests against real user folders.
 
-## Milestone 1 Acceptance Matrix
+## Historical Milestone 1 Acceptance Matrix
 
-Milestone 1 cannot be considered complete without these tests.
+This completed matrix is retained as the safety baseline for all later Apply and Undo work.
 
 ### Windows Path Safety
 
@@ -194,7 +196,7 @@ Milestone 1 cannot be considered complete without these tests.
 
 Use injectable/testable filesystem abstractions for Windows-specific conditions that cannot be reliably created everywhere.
 
-## Future Undo Acceptance Matrix
+## Undo Acceptance Matrix
 
 All real-filesystem cases use dedicated temporary directories only. Windows
 reparse, cloud, identity, occupancy, lock, and rename behavior must also be
@@ -320,7 +322,7 @@ injectable so CI can prove fail-closed decisions without touching user data.
 
 ### Packaged GUI
 
-- Undo remains absent or disabled until deliberately enabled
+- Undo starts disabled and enables only for a freshly validated eligible Apply batch
 - persisted History opens in the packaged application
 - Undo Preview shows exact current and restore paths
 - blocked reasons and edited-file warnings render without truncation

@@ -1,20 +1,18 @@
 # File Operation Model
 
-FileFlow's operation engine should be a narrow service that executes approved plans. Rules and UI never perform filesystem operations directly.
+FileFlow's operation engine is a narrow service that executes approved plans. Rules and UI never perform filesystem operations directly.
 
-Initial supported operation types:
+Current supported real operation type:
 
 - `MOVE`
-- `RENAME`
-- `CREATE_DIRECTORY`
 
-Deletion is not part of the initial organization engine.
+Apply and Undo perform same-volume moves through the shared rename primitive after revalidation and durable intent recording. FileFlow does not expose general rename, directory creation, copy, replacement, or deletion operations.
 
-Milestone 1 has no real file operations. It defines models, planning, stale revalidation, journaling states, and a mocked operation interface only. It must have no capability to alter user files.
+Historical note: Milestone 1 had no real file operations. It defined models, planning, stale revalidation, journaling states, and a mocked operation interface. The current implementation preserves those contracts around its narrow real move boundary.
 
-## Milestone 1 Unsupported Path/Operation Conditions
+## Unsupported Path and Operation Conditions
 
-The operation model receives only paths already accepted by the safety layer. In Milestone 1, unsupported conditions include:
+The operation model receives only paths already accepted by the safety layer. Unsupported conditions include:
 
 - drive-relative paths
 - filesystem roots
@@ -35,7 +33,7 @@ These are `SAFETY_BLOCK` or `UNSUPPORTED`, not execution errors.
 
 Same-volume moves can use an atomic filesystem rename where available after all safety checks pass.
 
-Cross-volume real moves are not supported in the first real-operation milestone. They should be represented as `UNSUPPORTED`.
+Cross-volume real moves are not supported. They are represented as `UNSUPPORTED`.
 
 Future cross-volume support must address:
 
@@ -59,20 +57,13 @@ Rename is a move within the same directory.
 
 Case-only renames need special handling on case-insensitive filesystems. FileFlow should preview them as `CASE_ONLY_RENAME` and block until the implementation has a tested two-step strategy that cannot collide with existing paths.
 
-Decision: case-only rename is `UNSUPPORTED` initially and remains unsupported for the first real move milestone.
+Decision: case-only rename remains `UNSUPPORTED`.
 
 ## CREATE_DIRECTORY
 
-Directory creation is allowed only for planned destination folders under approved destination boundaries. It must not follow a destination parent that became a reparse point between preview and apply.
+Directory creation is not supported. Destination category folders must already exist under the selected root. A missing folder produces a Blocked row and clear guidance to create it manually before choosing **Analyse Again**.
 
-Directory creation is not an applied operation in Milestone 1.
-
-Directory creation records:
-
-- path
-- reason
-- whether it already existed at preview
-- whether FileFlow created it at apply
+No Apply or Undo path calls `mkdir`, `makedirs`, or any equivalent user-folder creation primitive.
 
 ## Failure Behavior
 
