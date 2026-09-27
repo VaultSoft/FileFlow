@@ -4,19 +4,26 @@ from datetime import datetime
 import ntpath
 
 from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtGui import QColor, QCloseEvent
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QFrame,
+    QHeaderView,
     QMessageBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -25,9 +32,10 @@ from PyQt6.QtWidgets import (
 )
 
 from ..apply_controller import ApplyController, ApplyResult, ApplyState, batch_source_folder
-from ..app_metadata import APP_NAME
+from ..app_metadata import APP_NAME, APP_VERSION
 from ..models import StructuredError
 from ..preview_workflow import PreviewAnalysis, PreviewWorkflowService
+from ..rules import test_filename_against_rules
 from ..storage import Database
 from ..undo import UndoController, UndoControllerState, UndoPlan, UndoResult
 from ..workers.apply_worker import ApplyWorker
@@ -59,7 +67,8 @@ class MainWindow(QMainWindow):
         self.undo_worker: UndoWorker | None = None
 
         self.setWindowTitle(APP_NAME)
-        self.resize(1120, 720)
+        self.resize(1280, 800)
+        self.setMinimumSize(1040, 680)
         self.setStyleSheet(APP_STYLESHEET)
         self._build_ui()
         self._show_home()
@@ -67,74 +76,130 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget()
         shell = QHBoxLayout(root)
-        shell.setContentsMargins(16, 16, 16, 16)
-        shell.setSpacing(14)
+        shell.setContentsMargins(14, 14, 14, 14)
+        shell.setSpacing(16)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(202)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(12, 12, 12, 12)
+        sidebar_layout.setSpacing(10)
+
+        brand = QFrame()
+        brand.setObjectName("brandPanel")
+        brand_layout = QGridLayout(brand)
+        brand_layout.setContentsMargins(2, 4, 2, 14)
+        brand_layout.setHorizontalSpacing(10)
+        mark = QLabel("F")
+        mark.setObjectName("brandMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(38, 38)
+        brand_layout.addWidget(mark, 0, 0, 2, 1)
+        brand_name = QLabel("FileFlow")
+        brand_name.setObjectName("brandName")
+        brand_layout.addWidget(brand_name, 0, 1)
+        brand_meta = QLabel(f"VaultSoft  |  v{APP_VERSION}")
+        brand_meta.setObjectName("brandMeta")
+        brand_layout.addWidget(brand_meta, 1, 1)
+        sidebar_layout.addWidget(brand)
 
         self.nav = QListWidget()
-        self.nav.setFixedWidth(170)
+        self.nav.setObjectName("navigation")
         for label in ("Preview", "History", "Rules", "Settings"):
             QListWidgetItem(label, self.nav)
         self.nav.setCurrentRow(0)
-        shell.addWidget(self.nav)
+        sidebar_layout.addWidget(self.nav, 1)
+        safety_note = QLabel("Same-volume moves only\nNo overwrite  |  No delete")
+        safety_note.setObjectName("brandMeta")
+        safety_note.setWordWrap(True)
+        sidebar_layout.addWidget(safety_note)
+        shell.addWidget(sidebar)
 
         self.pages = QStackedWidget()
         shell.addWidget(self.pages, 1)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.nav.currentRowChanged.connect(self._page_changed)
 
         self.preview_page = self._build_preview_page()
         self.history_page = self._build_history_page()
+        self.rules_page = self._build_rules_page()
+        self.settings_page = self._build_settings_page()
         self.pages.addWidget(self.preview_page)
         self.pages.addWidget(self.history_page)
-        self.pages.addWidget(self._placeholder_page("Rules", "Built-in rules are active. Editing rules is deferred."))
-        self.pages.addWidget(self._placeholder_page("Settings", "Settings are intentionally minimal while controlled same-volume moves are being refined."))
+        self.pages.addWidget(self.rules_page)
+        self.pages.addWidget(self.settings_page)
 
         self.setCentralWidget(root)
+
+    def _page_heading(self, title: str, subtitle: str) -> tuple[QLabel, QLabel]:
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        description = QLabel(subtitle)
+        description.setObjectName("pageSubtitle")
+        description.setWordWrap(True)
+        return heading, description
+
+    def _configure_table(self, table: QTableWidget) -> None:
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setHighlightSections(False)
+
+    def _page_changed(self, index: int) -> None:
+        if index == 1:
+            self._refresh_history()
 
     def _build_preview_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setSpacing(12)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(10)
 
-        self.title = QLabel("FileFlow")
-        self.title.setObjectName("headline")
+        self.title, intro = self._page_heading(
+            "Preview",
+            "Choose a folder, inspect every proposed move, then explicitly confirm only the files marked Ready.",
+        )
         layout.addWidget(self.title)
-
-        intro = QLabel("FileFlow analyses your folder first and shows an exact preview before any files are moved.")
-        intro.setObjectName("muted")
-        intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        workflow = QLabel("1  Choose Folder     2  Analyse     3  Review Preview     4  Apply     5  View Result / History")
-        workflow.setObjectName("sectionTitle")
-        workflow.setWordWrap(True)
-        layout.addWidget(workflow)
-
-        limits = QLabel("Current limits: immediate files only, same-volume moves only, no overwrite, and a maximum of 100 moves per Apply.")
-        limits.setObjectName("muted")
-        limits.setWordWrap(True)
-        layout.addWidget(limits)
-
-        top = QHBoxLayout()
+        folder_panel = QFrame()
+        folder_panel.setObjectName("panel")
+        top = QHBoxLayout(folder_panel)
+        top.setContentsMargins(12, 10, 12, 10)
         self.folder_label = QLabel("No folder selected")
-        self.folder_label.setObjectName("sectionTitle")
+        self.folder_label.setObjectName("pathLabel")
         self.folder_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.folder_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         top.addWidget(self.folder_label, 1)
 
         self.select_button = QPushButton("Choose Folder")
+        self.select_button.setObjectName("secondaryButton")
+        self.select_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.select_button.clicked.connect(self.select_folder)
         top.addWidget(self.select_button)
 
         self.analyse_button = QPushButton("Analyse")
+        self.analyse_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self.analyse_button.clicked.connect(self.start_analysis)
         self.analyse_button.setEnabled(False)
         top.addWidget(self.analyse_button)
-        layout.addLayout(top)
+        layout.addWidget(folder_panel)
 
         self.status_label = QLabel("")
-        self.status_label.setObjectName("muted")
+        self.status_label.setObjectName("statusBanner")
+        self.status_label.setProperty("tone", "neutral")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        self.preview_progress = QProgressBar()
+        self.preview_progress.setRange(0, 1)
+        self.preview_progress.setValue(0)
+        self.preview_progress.setVisible(False)
+        layout.addWidget(self.preview_progress)
 
         self.summary_frame = QFrame()
         self.summary_frame.setObjectName("summaryStrip")
@@ -160,23 +225,51 @@ class MainWindow(QMainWindow):
             summary_layout.addWidget(value, 1, index)
         layout.addWidget(self.summary_frame)
 
+        filters = QHBoxLayout()
+        filter_title = QLabel("Preview rows")
+        filter_title.setObjectName("sectionHeading")
+        filters.addWidget(filter_title)
+        filters.addStretch(1)
+        self.preview_filter = QComboBox()
+        self.preview_filter.addItems(("All statuses", "Ready", "Blocked", "Collisions", "Unsupported"))
+        self.preview_filter.setToolTip("Filter preview rows by safety status")
+        self.preview_filter.currentIndexChanged.connect(self._filter_preview_rows)
+        filters.addWidget(self.preview_filter)
+        self.preview_search = QLineEdit()
+        self.preview_search.setPlaceholderText("Search filename or category")
+        self.preview_search.setClearButtonEnabled(True)
+        self.preview_search.setMaximumWidth(280)
+        self.preview_search.textChanged.connect(self._filter_preview_rows)
+        filters.addWidget(self.preview_search)
+        self.preview_filter_count = QLabel("0 shown")
+        self.preview_filter_count.setObjectName("muted")
+        filters.addWidget(self.preview_filter_count)
+        layout.addLayout(filters)
+
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(("Status", "Filename", "Category", "Source", "Destination", "Reason"))
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._configure_table(self.table)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._show_selected_detail)
         layout.addWidget(self.table, 1)
 
-        bottom = QHBoxLayout()
         self.detail = QTextEdit()
         self.detail.setReadOnly(True)
-        self.detail.setMinimumHeight(120)
-        bottom.addWidget(self.detail, 1)
+        self.detail.setMinimumHeight(100)
+        self.detail.setMaximumHeight(145)
+        layout.addWidget(self.detail)
 
-        actions = QVBoxLayout()
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
         self.validate_button = QPushButton("Validate Preview")
         self.validate_button.setObjectName("secondaryButton")
+        self.validate_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         self.validate_button.clicked.connect(self.validate_preview)
         self.validate_button.setEnabled(False)
         actions.addWidget(self.validate_button)
@@ -187,41 +280,75 @@ class MainWindow(QMainWindow):
         self.reanalyse_button.setEnabled(False)
         actions.addWidget(self.reanalyse_button)
 
-        self.apply_button = QPushButton("Apply")
+        actions.addStretch(1)
+        self.apply_hint_label = QLabel("Apply unlocks after a valid preview.")
+        self.apply_hint_label.setObjectName("muted")
+        actions.addWidget(self.apply_hint_label)
+
+        self.apply_button = QPushButton("Move Ready Files")
+        self.apply_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
         self.apply_button.clicked.connect(self.start_apply)
         self.apply_button.setEnabled(False)
         actions.addWidget(self.apply_button)
-        actions.addStretch(1)
-        bottom.addLayout(actions)
-        layout.addLayout(bottom)
+        layout.addLayout(actions)
         return page
 
     def _build_history_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        heading = QLabel("History")
-        heading.setObjectName("headline")
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(10)
+        heading, subtitle = self._page_heading(
+            "History & Undo",
+            "Review persisted Apply results, inspect recovery state, and preview safe same-volume Undo operations.",
+        )
         layout.addWidget(heading)
+        layout.addWidget(subtitle)
+
         self.recovery_banner = QLabel("")
-        self.recovery_banner.setObjectName("muted")
+        self.recovery_banner.setObjectName("statusBanner")
+        self.recovery_banner.setProperty("tone", "success")
         self.recovery_banner.setWordWrap(True)
         layout.addWidget(self.recovery_banner)
+
+        history_bar = QHBoxLayout()
+        history_heading = QLabel("Apply batches")
+        history_heading.setObjectName("sectionHeading")
+        history_bar.addWidget(history_heading)
+        history_bar.addStretch(1)
+        self.refresh_history_button = QPushButton("Refresh")
+        self.refresh_history_button.setObjectName("secondaryButton")
+        self.refresh_history_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.refresh_history_button.clicked.connect(self._refresh_history)
+        history_bar.addWidget(self.refresh_history_button)
+        layout.addLayout(history_bar)
+
         self.history_table = QTableWidget(0, 7)
         self.history_table.setHorizontalHeaderLabels(("Date / Time", "Source Folder", "Operations", "Moved", "Failed", "Recovery", "Status"))
-        self.history_table.horizontalHeader().setStretchLastSection(True)
-        self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._configure_table(self.history_table)
+        history_header = self.history_table.horizontalHeader()
+        history_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        history_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column in range(2, 7):
+            history_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         self.history_table.itemSelectionChanged.connect(self._show_history_detail)
         layout.addWidget(self.history_table, 1)
+
         self.history_detail = QTextEdit()
         self.history_detail.setReadOnly(True)
-        self.history_detail.setMinimumHeight(120)
+        self.history_detail.setMinimumHeight(100)
+        self.history_detail.setMaximumHeight(150)
         self.history_detail.setPlainText("Select a history row to view its read-only details.")
         layout.addWidget(self.history_detail)
 
         undo_actions = QHBoxLayout()
+        undo_title = QLabel("Undo preview")
+        undo_title.setObjectName("sectionHeading")
+        undo_actions.addWidget(undo_title)
+        undo_actions.addStretch(1)
         self.preview_undo_button = QPushButton("Preview Undo")
         self.preview_undo_button.setObjectName("secondaryButton")
+        self.preview_undo_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         self.preview_undo_button.setEnabled(False)
         self.preview_undo_button.clicked.connect(self.preview_undo)
         undo_actions.addWidget(self.preview_undo_button)
@@ -229,41 +356,172 @@ class MainWindow(QMainWindow):
         self.confirm_undo_button.setEnabled(False)
         self.confirm_undo_button.clicked.connect(self.start_undo)
         undo_actions.addWidget(self.confirm_undo_button)
-        undo_actions.addStretch(1)
         layout.addLayout(undo_actions)
 
-        undo_heading = QLabel("Undo Preview")
-        undo_heading.setObjectName("sectionTitle")
-        layout.addWidget(undo_heading)
         self.undo_summary_label = QLabel("Select an eligible Apply batch, then choose Preview Undo. No files move during preview.")
-        self.undo_summary_label.setObjectName("muted")
+        self.undo_summary_label.setObjectName("statusBanner")
+        self.undo_summary_label.setProperty("tone", "neutral")
         self.undo_summary_label.setWordWrap(True)
         layout.addWidget(self.undo_summary_label)
+
+        self.undo_progress = QProgressBar()
+        self.undo_progress.setRange(0, 1)
+        self.undo_progress.setValue(0)
+        self.undo_progress.setVisible(False)
+        layout.addWidget(self.undo_progress)
+
         self.undo_table = QTableWidget(0, 5)
         self.undo_table.setHorizontalHeaderLabels(("Status", "Filename", "Current Location", "Restore Location", "Reason"))
-        self.undo_table.horizontalHeader().setStretchLastSection(True)
-        self.undo_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.undo_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.undo_table.setMinimumHeight(180)
+        self._configure_table(self.undo_table)
+        undo_header = self.undo_table.horizontalHeader()
+        undo_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        undo_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        undo_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        undo_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        undo_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.undo_table.setMinimumHeight(155)
         layout.addWidget(self.undo_table)
         return page
 
-    def _placeholder_page(self, title: str, message: str) -> QWidget:
+    def _build_rules_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        heading = QLabel(title)
-        heading.setObjectName("headline")
-        body = QLabel(message)
-        body.setObjectName("muted")
-        body.setWordWrap(True)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(10)
+        heading, body = self._page_heading(
+            "Rules",
+            "Built-in extension rules are deterministic and read-only in this release candidate. Preview always shows the exact result before Apply.",
+        )
         layout.addWidget(heading)
         layout.addWidget(body)
+
+        overview = QHBoxLayout()
+        active_categories = sum(1 for category in self.service.categories if category.enabled and category.extensions)
+        overview_label = QLabel(f"{active_categories} active categories")
+        overview_label.setObjectName("sectionHeading")
+        overview.addWidget(overview_label)
+        overview.addStretch(1)
+        scope = QLabel("First matching active rule wins")
+        scope.setObjectName("muted")
+        overview.addWidget(scope)
+        layout.addLayout(overview)
+
+        self.rules_table = QTableWidget(0, 4)
+        self.rules_table.setHorizontalHeaderLabels(("State", "Category", "Destination folder", "Extensions"))
+        self._configure_table(self.rules_table)
+        rules_header = self.rules_table.horizontalHeader()
+        rules_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        rules_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        rules_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        rules_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        categories = tuple(sorted(self.service.categories, key=lambda category: (category.sort_order, category.id)))
+        self.rules_table.setRowCount(len(categories))
+        for row_index, category in enumerate(categories):
+            state = "Active" if category.enabled and category.extensions else "Inactive"
+            values = (state, category.name, category.destination_folder, ", ".join(category.extensions) or "No automatic match")
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setForeground(QColor("#00d4aa" if state == "Active" else "#8b949e"))
+                self.rules_table.setItem(row_index, column, item)
+        layout.addWidget(self.rules_table, 1)
+
+        tester = QFrame()
+        tester.setObjectName("rulesTester")
+        tester_layout = QGridLayout(tester)
+        tester_layout.setContentsMargins(12, 10, 12, 10)
+        tester_title = QLabel("Test a filename")
+        tester_title.setObjectName("sectionHeading")
+        tester_layout.addWidget(tester_title, 0, 0, 1, 3)
+        tester_hint = QLabel("This checks rule matching only. It does not inspect your disk or bypass Preview safety checks.")
+        tester_hint.setObjectName("fieldHint")
+        tester_hint.setWordWrap(True)
+        tester_layout.addWidget(tester_hint, 1, 0, 1, 3)
+        self.rule_test_input = QLineEdit()
+        self.rule_test_input.setPlaceholderText("Example: holiday-photo.jpg")
+        self.rule_test_input.setClearButtonEnabled(True)
+        self.rule_test_input.returnPressed.connect(self._test_rule_filename)
+        tester_layout.addWidget(self.rule_test_input, 2, 0, 1, 2)
+        self.rule_test_button = QPushButton("Test")
+        self.rule_test_button.clicked.connect(self._test_rule_filename)
+        tester_layout.addWidget(self.rule_test_button, 2, 2)
+        self.rule_test_result = QLabel("Enter a filename to see which built-in rule would match.")
+        self.rule_test_result.setObjectName("statusBanner")
+        self.rule_test_result.setProperty("tone", "neutral")
+        self.rule_test_result.setWordWrap(True)
+        tester_layout.addWidget(self.rule_test_result, 3, 0, 1, 3)
+        layout.addWidget(tester)
+        return page
+
+    def _build_settings_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 2, 4, 4)
+        layout.setSpacing(10)
+        heading, body = self._page_heading(
+            "Settings & Safety",
+            "FileFlow keeps its release-candidate behavior intentionally narrow. These boundaries are fixed, not hidden preferences.",
+        )
+        layout.addWidget(heading)
+        layout.addWidget(body)
+
+        safety_panel = QFrame()
+        safety_panel.setObjectName("safetyPanel")
+        safety_layout = QGridLayout(safety_panel)
+        safety_layout.setContentsMargins(14, 12, 14, 12)
+        boundaries = (
+            ("Scan scope", "Immediate child files only; folders are never traversed."),
+            ("Move scope", "Same-volume moves only, using the exact Preview destination."),
+            ("Collision policy", "Existing or case-equivalent destinations are blocked; no overwrite or auto-rename."),
+            ("Undo", "Location-only restore after identity and original-path checks."),
+            ("Recovery", "Read-only evidence; FileFlow never retries or repairs automatically."),
+            ("Batch limit", "A maximum of 100 ready operations; larger plans are blocked, never truncated."),
+        )
+        for row_index, (name, detail) in enumerate(boundaries):
+            name_label = QLabel(name)
+            name_label.setObjectName("sectionHeading")
+            detail_label = QLabel(detail)
+            detail_label.setObjectName("muted")
+            detail_label.setWordWrap(True)
+            safety_layout.addWidget(name_label, row_index, 0, Qt.AlignmentFlag.AlignTop)
+            safety_layout.addWidget(detail_label, row_index, 1)
+        safety_layout.setColumnStretch(1, 1)
+        layout.addWidget(safety_panel)
+
+        app_panel = QFrame()
+        app_panel.setObjectName("panel")
+        app_layout = QGridLayout(app_panel)
+        app_layout.setContentsMargins(14, 12, 14, 12)
+        app_layout.addWidget(QLabel("Version"), 0, 0)
+        app_layout.addWidget(QLabel(APP_VERSION), 0, 1)
+        app_layout.addWidget(QLabel("History database"), 1, 0)
+        database_path = QLabel(self.database.path)
+        database_path.setObjectName("muted")
+        database_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        database_path.setWordWrap(True)
+        app_layout.addWidget(database_path, 1, 1)
+        app_layout.setColumnStretch(1, 1)
+        layout.addWidget(app_panel)
         layout.addStretch(1)
         return page
 
+    def _test_rule_filename(self) -> None:
+        result = test_filename_against_rules(self.rule_test_input.text(), self.service.rules, self.service.categories)
+        tone = "success" if result.matched else "neutral" if result.valid else "warning"
+        self._set_banner(self.rule_test_result, result.message, tone)
+
+    def _set_banner(self, label: QLabel, text: str, tone: str = "neutral") -> None:
+        label.setText(text)
+        label.setProperty("tone", tone)
+        label.style().unpolish(label)
+        label.style().polish(label)
+
     def _show_home(self) -> None:
-        self.status_label.setText("Start by selecting a folder. FileFlow will analyse only immediate child files.")
-        self.detail.setPlainText("No preview yet.")
+        self._set_banner(
+            self.status_label,
+            "Choose a folder to begin. FileFlow analyses immediate child files only and makes no changes during Preview.",
+        )
+        self.detail.setPlainText("No preview yet. Select a folder to inspect the exact rule matches, destinations, and safety decisions.")
         self._refresh_history()
         self._refresh_apply_state()
 
@@ -274,7 +532,8 @@ class MainWindow(QMainWindow):
         self.selected_folder = folder
         self.folder_label.setText(folder)
         validation = self.service.validate_folder(folder)
-        self.status_label.setText(present_analysis(PreviewAnalysis(validation, (), None)).validation_message)
+        tone = "success" if validation.allowed else "danger"
+        self._set_banner(self.status_label, present_analysis(PreviewAnalysis(validation, (), None)).validation_message, tone)
         self.analyse_button.setEnabled(validation.allowed)
         self.reanalyse_button.setEnabled(False)
         self.validate_button.setEnabled(False)
@@ -286,7 +545,9 @@ class MainWindow(QMainWindow):
     def start_analysis(self) -> None:
         if not self.selected_folder or self.worker_thread is not None:
             return
-        self.status_label.setText("Analysing immediate child files...")
+        self._set_banner(self.status_label, "Analysing immediate child files. No files are being moved.")
+        self.preview_progress.setRange(0, 0)
+        self.preview_progress.setVisible(True)
         self.analyse_button.setEnabled(False)
         self.reanalyse_button.setEnabled(False)
         self.validate_button.setEnabled(False)
@@ -311,6 +572,9 @@ class MainWindow(QMainWindow):
             self.worker_thread.deleteLater()
         self.worker = None
         self.worker_thread = None
+        self.preview_progress.setRange(0, 1)
+        self.preview_progress.setValue(1)
+        self.preview_progress.setVisible(False)
         self.analyse_button.setEnabled(self.selected_folder is not None)
         self._refresh_apply_state()
 
@@ -325,7 +589,7 @@ class MainWindow(QMainWindow):
         self._refresh_apply_state()
 
     def _analysis_failed(self, error: StructuredError) -> None:
-        self.status_label.setText(structured_error_text(error))
+        self._set_banner(self.status_label, structured_error_text(error), "danger")
         self.detail.setPlainText(error.message)
         self._refresh_apply_state()
 
@@ -347,14 +611,37 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    item.setForeground(status_color(row.status))
                 self.table.setItem(row_index, column, item)
-        self.table.resizeColumnsToContents()
-        self.status_label.setText(presentation.validation_message)
+        tone = "success" if summary.ready else "warning" if presentation.rows else "neutral"
+        self._set_banner(self.status_label, presentation.validation_message, tone)
+        self._filter_preview_rows()
         self._refresh_apply_state()
         if presentation.rows:
             self.table.selectRow(0)
         else:
             self.detail.setPlainText("No preview rows to display.")
+
+    def _filter_preview_rows(self) -> None:
+        selected_filter = self.preview_filter.currentText() if hasattr(self, "preview_filter") else "All statuses"
+        status_filter = {
+            "Ready": "READY",
+            "Blocked": "BLOCKED",
+            "Collisions": "COLLISION",
+            "Unsupported": "UNSUPPORTED",
+        }.get(selected_filter)
+        search = self.preview_search.text().strip().casefold() if hasattr(self, "preview_search") else ""
+        shown = 0
+        for row_index in range(self.table.rowCount()):
+            status_item = self.table.item(row_index, 0)
+            values = tuple(self.table.item(row_index, column).text() for column in (1, 2) if self.table.item(row_index, column))
+            matches_status = status_filter is None or (status_item is not None and status_item.text() == status_filter)
+            matches_search = not search or any(search in value.casefold() for value in values)
+            visible = matches_status and matches_search
+            self.table.setRowHidden(row_index, not visible)
+            shown += int(visible)
+        if hasattr(self, "preview_filter_count"):
+            self.preview_filter_count.setText(f"{shown} shown")
 
     def _show_selected_detail(self) -> None:
         if self.current_presentation is None:
@@ -376,7 +663,11 @@ class MainWindow(QMainWindow):
         if presentation.reasons:
             lines.append("")
             lines.extend(f"- {reason}" for reason in presentation.reasons)
-        self.status_label.setText(presentation.title)
+        self._set_banner(
+            self.status_label,
+            f"{presentation.title}. {presentation.message}",
+            "success" if presentation.status == "VALID" else "warning",
+        )
         self.detail.setPlainText("\n".join(lines))
         self.reanalyse_button.setEnabled(self.selected_folder is not None and presentation.status != "VALID")
         self.apply_state = ApplyState.PREVIEW_VALID if presentation.status == "VALID" else ApplyState.PREVIEW_STALE
@@ -388,18 +679,21 @@ class MainWindow(QMainWindow):
         plan = self.current_analysis.plan
         readiness = self.apply_controller.validate_before_confirmation(plan)
         if not readiness.can_apply:
-            self.status_label.setText(readiness.message)
+            self._set_banner(self.status_label, readiness.message, "warning")
             self.apply_state = readiness.state
             self._refresh_apply_state()
             return
         summary = self.apply_controller.confirmation_summary(plan)
         if not self._confirm_apply(summary):
-            self.status_label.setText("Move cancelled. No files were changed.")
+            self._set_banner(self.status_label, "Move cancelled. No files were changed.")
             self._refresh_apply_state()
             return
         self.apply_state = ApplyState.APPLYING
         self.apply_button.setEnabled(False)
-        self.status_label.setText("Moving files...")
+        self._set_banner(self.status_label, "Applying the confirmed plan. FileFlow is verifying every move.")
+        self.preview_progress.setRange(0, summary.operation_count)
+        self.preview_progress.setValue(0)
+        self.preview_progress.setVisible(True)
         self.apply_thread = QThread(self)
         self.apply_worker = ApplyWorker(self.database.path, plan)
         self.apply_worker.moveToThread(self.apply_thread)
@@ -441,19 +735,27 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is move
 
     def _apply_progress(self, source: str, index: int, total: int) -> None:
-        self.status_label.setText(f"Moving {index} of {total}: {source}")
+        self.preview_progress.setRange(0, total)
+        self.preview_progress.setValue(index)
+        self._set_banner(self.status_label, f"Moving {index} of {total}: {source}")
 
     def _apply_finished(self, result: ApplyResult) -> None:
         self.apply_state = result.state
-        self.status_label.setText(result.message)
+        tone = "danger" if result.recovery_required else "success" if result.succeeded else "warning"
+        self._set_banner(self.status_label, result.message, tone)
         self.detail.setPlainText(
-            f"Moved: {result.succeeded}\nFailed safely: {result.failed}\nBlocked: {result.blocked}\nRecovery required: {result.recovery_required}\n\nChoose Analyse Again to create a fresh preview."
+            "Apply result\n"
+            f"Moved and verified: {result.succeeded}\n"
+            f"Failed safely: {result.failed}\n"
+            f"Blocked or excluded: {result.blocked}\n"
+            f"Recovery review required: {result.recovery_required}\n\n"
+            "This preview has been consumed. Choose Analyse Again for a new plan, or open History for persisted details and Undo eligibility."
         )
         self._refresh_history()
 
     def _apply_failed(self, error: StructuredError) -> None:
         self.apply_state = ApplyState.RECOVERY_REQUIRED
-        self.status_label.setText(structured_error_text(error))
+        self._set_banner(self.status_label, structured_error_text(error), "danger")
         self.detail.setPlainText(error.message)
         self._refresh_history()
 
@@ -464,6 +766,7 @@ class MainWindow(QMainWindow):
             self.apply_thread.deleteLater()
         self.apply_worker = None
         self.apply_thread = None
+        self.preview_progress.setVisible(False)
         self._refresh_apply_state()
 
     def _refresh_apply_state(self) -> None:
@@ -478,11 +781,14 @@ class MainWindow(QMainWindow):
         else:
             self.apply_button.setEnabled(readiness.can_apply)
         if readiness.can_apply:
-            self.apply_button.setText("Apply")
+            count = readiness.ready_count
+            self.apply_button.setText(f"Move {count} File{'s' if count != 1 else ''}")
+            self.apply_hint_label.setText(f"{format_bytes(readiness.total_bytes)} across {count} ready move{'s' if count != 1 else ''}")
         else:
-            self.apply_button.setText("Apply")
+            self.apply_button.setText("Move Ready Files")
+            self.apply_hint_label.setText(readiness.message)
         if plan is None and readiness.state in (ApplyState.APPLYING, ApplyState.RECOVERY_REQUIRED):
-            self.status_label.setText(readiness.message)
+            self._set_banner(self.status_label, readiness.message, "danger")
 
     def _refresh_history(self) -> None:
         rows = self.apply_controller.history_rows()
@@ -503,38 +809,44 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, row["id"])
+                if column == 6:
+                    item.setForeground(history_status_color(row["status"]))
                 self.history_table.setItem(row_index, column, item)
         unresolved = self.apply_controller.operations_requiring_recovery()
         undo_recovery = self.undo_controller.recovery_inspections()
+        lock_status = self.apply_controller.execution_lock_status()
+        self.mutation_globally_blocked = bool(unresolved or undo_recovery or lock_status.blocks_apply)
         if unresolved:
             first = unresolved[0]
-            self.recovery_banner.setObjectName("recoveryWarning")
-            self.recovery_banner.style().unpolish(self.recovery_banner)
-            self.recovery_banner.style().polish(self.recovery_banner)
-            self.recovery_banner.setText(
-                "A previous move could not be fully verified. FileFlow has stopped further changes until the operation is reviewed. "
-                f"Source: {first['source_before']} Destination: {first['destination'] or ''} State: {first['result']}"
+            self._set_banner(
+                self.recovery_banner,
+                "Recovery review required. A previous move could not be fully verified, so Apply and Undo are locked.\n"
+                f"Source: {first['source_before']}\nDestination: {first['destination'] or ''}\nState: {first['result']}",
+                "danger",
             )
         elif undo_recovery:
             first, inspection = undo_recovery[0]
-            self.recovery_banner.setObjectName("recoveryWarning")
-            self.recovery_banner.style().unpolish(self.recovery_banner)
-            self.recovery_banner.style().polish(self.recovery_banner)
-            self.recovery_banner.setText(
-                "A previous Undo could not be fully verified. FileFlow has stopped further changes until the operation is reviewed. "
-                f"Current location: {first['source_before']} Restore location: {first['restore_destination']} "
-                f"State: {first['state']} Assessment: {inspection.classification.value}"
+            self._set_banner(
+                self.recovery_banner,
+                "Recovery review required. A previous Undo could not be fully verified, so Apply and Undo are locked.\n"
+                f"Current location: {first['source_before']}\nRestore location: {first['restore_destination']}\n"
+                f"State: {first['state']}  Assessment: {inspection.classification.value}",
+                "danger",
             )
         else:
-            lock_status = self.apply_controller.execution_lock_status()
             if lock_status.blocks_apply:
-                self.recovery_banner.setObjectName("recoveryWarning")
-                self.recovery_banner.setText(lock_status.message)
+                self._set_banner(self.recovery_banner, lock_status.message, "warning")
             else:
-                self.recovery_banner.setObjectName("muted")
-                self.recovery_banner.setText("No recovery review is currently required.")
-            self.recovery_banner.style().unpolish(self.recovery_banner)
-            self.recovery_banner.style().polish(self.recovery_banner)
+                self._set_banner(
+                    self.recovery_banner,
+                    "Recovery status is clear. History is read-only until you explicitly preview an eligible Undo.",
+                    "success",
+                )
+        if not rows:
+            self.history_detail.setPlainText("No Apply history yet. Completed and safely failed operations will appear here.")
+            self.preview_undo_button.setEnabled(False)
+        elif not self.history_table.selectedItems():
+            self.history_table.selectRow(0)
 
     def _show_history_detail(self) -> None:
         selected = self.history_table.selectedItems()
@@ -548,7 +860,10 @@ class MainWindow(QMainWindow):
         self.current_undo_plan = None
         self.undo_table.setRowCount(0)
         self.confirm_undo_button.setEnabled(False)
-        self.undo_summary_label.setText("Choose Preview Undo to re-check exact file identities and restore paths. No files move during preview.")
+        self._set_banner(
+            self.undo_summary_label,
+            "Choose Preview Undo to re-check exact file identities and restore paths. No files move during preview.",
+        )
         operations = self.apply_controller.history_operations(batch_id)
         lines = [
             f"Date / time: {format_history_time(row['started_at'] or row['approved_at'])}",
@@ -579,6 +894,7 @@ class MainWindow(QMainWindow):
             int(row["succeeded_count"] or 0) > 0
             and self.apply_thread is None
             and self.undo_thread is None
+            and not self.mutation_globally_blocked
         )
 
     def preview_undo(self) -> None:
@@ -588,7 +904,7 @@ class MainWindow(QMainWindow):
         try:
             plan = self.undo_controller.create_plan(batch_id)
         except Exception as exc:
-            self.undo_summary_label.setText(f"Undo Preview could not be created safely: {exc}")
+            self._set_banner(self.undo_summary_label, f"Undo Preview could not be created safely: {exc}", "danger")
             self.confirm_undo_button.setEnabled(False)
             return
         self.current_undo_plan = plan
@@ -612,12 +928,17 @@ class MainWindow(QMainWindow):
                 reason,
             )
             for column, value in enumerate(values):
-                self.undo_table.setItem(row_index, column, QTableWidgetItem(value))
-        self.undo_table.resizeColumnsToContents()
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setForeground(status_color(operation.status.value))
+                self.undo_table.setItem(row_index, column, item)
         readiness = self.undo_controller.readiness(plan)
-        self.undo_summary_label.setText(
+        tone = "success" if readiness.can_undo else "warning"
+        self._set_banner(
+            self.undo_summary_label,
             f"Ready: {readiness.ready_count}. Blocked successful moves: {readiness.blocked_count}. "
-            f"Apply operations that never moved successfully: {readiness.excluded_apply_count}. {readiness.message}"
+            f"Apply operations that never moved successfully: {readiness.excluded_apply_count}. {readiness.message}",
+            tone,
         )
         self.confirm_undo_button.setText(f"Undo {readiness.ready_count} File{'s' if readiness.ready_count != 1 else ''}")
         self.confirm_undo_button.setEnabled(readiness.can_undo and self.apply_thread is None and self.undo_thread is None)
@@ -627,17 +948,20 @@ class MainWindow(QMainWindow):
             return
         readiness = self.undo_controller.validate_before_confirmation(self.current_undo_plan)
         if not readiness.can_undo:
-            self.undo_summary_label.setText(readiness.message + " Create a fresh Undo Preview.")
+            self._set_banner(self.undo_summary_label, readiness.message + " Create a fresh Undo Preview.", "warning")
             self.confirm_undo_button.setEnabled(False)
             return
         summary = self.undo_controller.confirmation_summary(self.current_undo_plan)
         if not self._confirm_undo(summary):
-            self.undo_summary_label.setText("Undo cancelled. No files were changed.")
+            self._set_banner(self.undo_summary_label, "Undo cancelled. No files were changed.")
             return
         self.confirm_undo_button.setEnabled(False)
         self.preview_undo_button.setEnabled(False)
         self.apply_button.setEnabled(False)
-        self.undo_summary_label.setText("Restoring files to their exact original locations...")
+        self._set_banner(self.undo_summary_label, "Restoring files to their exact original locations.")
+        self.undo_progress.setRange(0, summary.operation_count)
+        self.undo_progress.setValue(0)
+        self.undo_progress.setVisible(True)
         self.undo_thread = QThread(self)
         self.undo_worker = UndoWorker(self.database.path, self.current_undo_plan)
         self.undo_worker.moveToThread(self.undo_thread)
@@ -674,16 +998,19 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is restore
 
     def _undo_progress(self, source: str, index: int, total: int) -> None:
-        self.undo_summary_label.setText(f"Restoring {index} of {total}: {source}")
+        self.undo_progress.setRange(0, total)
+        self.undo_progress.setValue(index)
+        self._set_banner(self.undo_summary_label, f"Restoring {index} of {total}: {source}")
 
     def _undo_finished(self, result: UndoResult) -> None:
-        self.undo_summary_label.setText(result.message)
+        tone = "danger" if result.recovery_required else "success" if result.succeeded else "warning"
+        self._set_banner(self.undo_summary_label, result.message, tone)
         self.confirm_undo_button.setEnabled(False)
         self.current_undo_plan = None
         self._refresh_history()
 
     def _undo_failed(self, error: StructuredError) -> None:
-        self.undo_summary_label.setText(structured_error_text(error))
+        self._set_banner(self.undo_summary_label, structured_error_text(error), "danger")
         self.confirm_undo_button.setEnabled(False)
         self._refresh_history()
 
@@ -694,6 +1021,7 @@ class MainWindow(QMainWindow):
             self.undo_thread.deleteLater()
         self.undo_worker = None
         self.undo_thread = None
+        self.undo_progress.setVisible(False)
         self._refresh_apply_state()
         self._show_history_detail()
 
@@ -703,6 +1031,32 @@ class MainWindow(QMainWindow):
             return None
         first = self.history_table.item(selected[0].row(), 0)
         return first.data(Qt.ItemDataRole.UserRole) if first is not None else None
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.worker_thread is not None or self.apply_thread is not None or self.undo_thread is not None:
+            QMessageBox.information(
+                self,
+                "FileFlow is still working",
+                "Wait for the current analysis or file operation to finish before closing FileFlow.",
+            )
+            event.ignore()
+            return
+        event.accept()
+
+
+def status_color(status: str) -> QColor:
+    normalized = status.upper()
+    if normalized in {"READY", "VALID", "SUCCEEDED", "COMPLETE"}:
+        return QColor("#00d4aa")
+    if normalized in {"BLOCKED", "RECOVERY_REQUIRED"}:
+        return QColor("#f85149")
+    if normalized in {"COLLISION", "UNSUPPORTED", "STALE", "INTERRUPTED"}:
+        return QColor("#e3b341")
+    return QColor("#8b949e")
+
+
+def history_status_color(status: str) -> QColor:
+    return status_color(status)
 
 
 def format_row_detail(row: PreviewRow) -> str:
