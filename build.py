@@ -15,6 +15,7 @@ DIST_DIR = ROOT / "dist"
 BUILD_DIR = ROOT / "build"
 APP_DIST = DIST_DIR / APP_NAME
 PORTABLE_ZIP = DIST_DIR / f"{APP_NAME}_v{VERSION}_Portable.zip"
+ICON = ROOT / "icon.ico"  # rendered from fileflow/ui/branding.py by make_icon.py
 QT_BIN = Path(PyQt6.__file__).resolve().parent / "Qt6" / "bin"
 QT_ROOT_DLLS = ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll")
 
@@ -44,6 +45,8 @@ def main() -> int:
         str(BUILD_DIR),
         "--distpath",
         str(DIST_DIR),
+        "--icon",
+        str(ICON),
         "--add-data",
         f"{ROOT / 'VERSION'};.",
     ]

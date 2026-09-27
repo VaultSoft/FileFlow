@@ -91,4 +91,6 @@ Expected outputs:
 - `dist\FileFlow\FileFlow.exe`
 - `dist\FileFlow_v0.9.0_Portable.zip`
 
+The .exe icon is the committed `icon.ico`. It is rendered from the in-app mark in `fileflow/ui/branding.py`; after changing that drawing, run `python -B make_icon.py` (needs Pillow) and commit the new `icon.ico`.
+
 See [Release Candidate](docs/RELEASE_CANDIDATE.md), [Safety Model](docs/SAFETY_MODEL.md), [Threading Model](docs/THREADING_MODEL.md), and [Undo Safety](docs/UNDO_SAFETY.md) for the implementation contract.

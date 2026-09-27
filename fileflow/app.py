@@ -23,9 +23,12 @@ _prepare_frozen_qt_path()
 
 from PyQt6.QtWidgets import QApplication
 
-from .app_metadata import APP_NAME
+from .app_metadata import APP_NAME, APP_VERSION
 from .storage import Database
+from .ui.branding import app_icon
 from .ui.main_window import MainWindow
+
+APP_USER_MODEL_ID = "VaultSoft.FileFlow"
 
 
 def default_database_path() -> Path:
@@ -34,9 +37,29 @@ def default_database_path() -> Path:
     return root / "fileflow.db"
 
 
+def _set_taskbar_identity() -> None:
+    # Without an explicit AppUserModelID Windows groups the window under the
+    # Python/PyInstaller host and shows a generic taskbar icon.
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> int:
+    _set_taskbar_identity()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName("VaultSoft")
+    # Fusion, as in the other VaultSoft apps: the stylesheet then draws every
+    # control, instead of Windows 11 adding its own selection accents.
+    app.setStyle("Fusion")
+    app.setWindowIcon(app_icon())
     database = Database(default_database_path())
     database.migrate()
     window = MainWindow(database=database)

@@ -23,7 +23,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -41,8 +40,9 @@ from ..undo import UndoController, UndoControllerState, UndoPlan, UndoResult
 from ..workers.apply_worker import ApplyWorker
 from ..workers.preview_worker import PreviewWorker
 from ..workers.undo_worker import UndoWorker
+from .branding import app_icon, mark_pixmap
 from .presentation import PreviewPresentation, PreviewRow, format_bytes, present_analysis, structured_error_text
-from .styles import APP_STYLESHEET
+from .styles import ACCENT, AMBER, APP_STYLESHEET, RED, TEXT_SUB
 
 
 class MainWindow(QMainWindow):
@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self.undo_worker: UndoWorker | None = None
 
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.resize(1280, 800)
         self.setMinimumSize(1040, 680)
         self.setStyleSheet(APP_STYLESHEET)
@@ -91,17 +92,17 @@ class MainWindow(QMainWindow):
         brand_layout = QGridLayout(brand)
         brand_layout.setContentsMargins(2, 4, 2, 14)
         brand_layout.setHorizontalSpacing(10)
-        mark = QLabel("F")
-        mark.setObjectName("brandMark")
-        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setFixedSize(38, 38)
-        brand_layout.addWidget(mark, 0, 0, 2, 1)
-        brand_name = QLabel("FileFlow")
+        brand_layout.setVerticalSpacing(3)
+        brand_layout.addWidget(self._brand_mark(40), 0, 0, 2, 1)
+        brand_name = QLabel(brand_wordmark())
         brand_name.setObjectName("brandName")
-        brand_layout.addWidget(brand_name, 0, 1)
-        brand_meta = QLabel(f"VaultSoft  |  v{APP_VERSION}")
+        brand_name.setTextFormat(Qt.TextFormat.RichText)
+        brand_layout.addWidget(brand_name, 0, 1, 1, 2)
+        brand_meta = QLabel("by VaultSoft")
         brand_meta.setObjectName("brandMeta")
         brand_layout.addWidget(brand_meta, 1, 1)
+        brand_layout.addWidget(self._version_pill(), 1, 2, Qt.AlignmentFlag.AlignLeft)
+        brand_layout.setColumnStretch(2, 1)
         sidebar_layout.addWidget(brand)
 
         self.nav = QListWidget()
@@ -110,9 +111,18 @@ class MainWindow(QMainWindow):
             QListWidgetItem(label, self.nav)
         self.nav.setCurrentRow(0)
         sidebar_layout.addWidget(self.nav, 1)
-        safety_note = QLabel("Same-volume moves only\nNo overwrite  |  No delete")
-        safety_note.setObjectName("brandMeta")
-        safety_note.setWordWrap(True)
+        safety_note = QFrame()
+        safety_note.setObjectName("safetyNote")
+        safety_note_layout = QVBoxLayout(safety_note)
+        safety_note_layout.setContentsMargins(10, 8, 10, 9)
+        safety_note_layout.setSpacing(3)
+        safety_title = QLabel("SAFETY")
+        safety_title.setObjectName("eyebrow")
+        safety_note_layout.addWidget(safety_title)
+        safety_text = QLabel("Same-volume moves only\nNo overwrite  \u00b7  No delete")
+        safety_text.setObjectName("safetyNoteText")
+        safety_text.setWordWrap(True)
+        safety_note_layout.addWidget(safety_text)
         sidebar_layout.addWidget(safety_note)
         shell.addWidget(sidebar)
 
@@ -132,6 +142,20 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(root)
 
+    def _brand_mark(self, size: int) -> QLabel:
+        mark = QLabel()
+        mark.setObjectName("brandMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(size, size)
+        mark.setPixmap(mark_pixmap(round(size * 0.62), tile=False, device_pixel_ratio=self.devicePixelRatioF()))
+        return mark
+
+    def _version_pill(self) -> QLabel:
+        pill = QLabel(f"v{APP_VERSION}")
+        pill.setObjectName("versionPill")
+        pill.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        return pill
+
     def _page_heading(self, title: str, subtitle: str) -> tuple[QLabel, QLabel]:
         heading = QLabel(title)
         heading.setObjectName("pageTitle")
@@ -147,7 +171,12 @@ class MainWindow(QMainWindow):
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(32)
         table.horizontalHeader().setHighlightSections(False)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        # Paths are the long values here; keep the drive and the filename visible.
+        table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        table.setWordWrap(False)
 
     def _page_changed(self, index: int) -> None:
         if index == 1:
@@ -178,12 +207,10 @@ class MainWindow(QMainWindow):
 
         self.select_button = QPushButton("Choose Folder")
         self.select_button.setObjectName("secondaryButton")
-        self.select_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         self.select_button.clicked.connect(self.select_folder)
         top.addWidget(self.select_button)
 
         self.analyse_button = QPushButton("Analyse")
-        self.analyse_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self.analyse_button.clicked.connect(self.start_analysis)
         self.analyse_button.setEnabled(False)
         top.addWidget(self.analyse_button)
@@ -211,7 +238,9 @@ class MainWindow(QMainWindow):
         self.summary_frame = QFrame()
         self.summary_frame.setObjectName("summaryStrip")
         summary_layout = QGridLayout(self.summary_frame)
-        summary_layout.setContentsMargins(12, 10, 12, 10)
+        summary_layout.setContentsMargins(16, 11, 16, 12)
+        summary_layout.setHorizontalSpacing(18)
+        summary_layout.setVerticalSpacing(2)
         self.summary_labels: dict[str, QLabel] = {}
         labels = (
             ("total", "Files"),
@@ -223,10 +252,12 @@ class MainWindow(QMainWindow):
             ("bytes", "Data"),
         )
         for index, (key, label) in enumerate(labels):
-            title = QLabel(label)
-            title.setObjectName("muted")
+            title = QLabel(label.upper())
+            title.setObjectName("eyebrow")
             value = QLabel("0")
             value.setObjectName("sectionTitle")
+            if key == "ready":
+                value.setStyleSheet(f"color: {ACCENT};")
             self.summary_labels[key] = value
             summary_layout.addWidget(title, 0, index)
             summary_layout.addWidget(value, 1, index)
@@ -276,7 +307,6 @@ class MainWindow(QMainWindow):
         actions.setSpacing(8)
         self.validate_button = QPushButton("Validate Preview")
         self.validate_button.setObjectName("secondaryButton")
-        self.validate_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         self.validate_button.clicked.connect(self.validate_preview)
         self.validate_button.setEnabled(False)
         actions.addWidget(self.validate_button)
@@ -293,7 +323,6 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.apply_hint_label)
 
         self.apply_button = QPushButton("Move Ready Files")
-        self.apply_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight))
         self.apply_button.clicked.connect(self.start_apply)
         self.apply_button.setEnabled(False)
         actions.addWidget(self.apply_button)
@@ -325,7 +354,6 @@ class MainWindow(QMainWindow):
         history_bar.addStretch(1)
         self.refresh_history_button = QPushButton("Refresh")
         self.refresh_history_button.setObjectName("secondaryButton")
-        self.refresh_history_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self.refresh_history_button.clicked.connect(self._refresh_history)
         history_bar.addWidget(self.refresh_history_button)
         layout.addLayout(history_bar)
@@ -355,7 +383,6 @@ class MainWindow(QMainWindow):
         undo_actions.addStretch(1)
         self.preview_undo_button = QPushButton("Preview Undo")
         self.preview_undo_button.setObjectName("secondaryButton")
-        self.preview_undo_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
         self.preview_undo_button.setEnabled(False)
         self.preview_undo_button.clicked.connect(self.preview_undo)
         undo_actions.addWidget(self.preview_undo_button)
@@ -429,7 +456,7 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:
-                    item.setForeground(QColor("#00d4aa" if state == "Active" else "#8b949e"))
+                    item.setForeground(QColor(ACCENT if state == "Active" else TEXT_SUB))
                 self.rules_table.setItem(row_index, column, item)
         layout.addWidget(self.rules_table, 1)
 
@@ -457,6 +484,7 @@ class MainWindow(QMainWindow):
         self.rule_test_result.setProperty("tone", "neutral")
         self.rule_test_result.setWordWrap(True)
         tester_layout.addWidget(self.rule_test_result, 3, 0, 1, 3)
+        tester_layout.setColumnStretch(0, 1)
         layout.addWidget(tester)
         return page
 
@@ -472,10 +500,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(heading)
         layout.addWidget(body)
 
+        boundaries_title = QLabel("SAFETY BOUNDARIES")
+        boundaries_title.setObjectName("groupTitle")
+        layout.addWidget(boundaries_title)
         safety_panel = QFrame()
         safety_panel.setObjectName("safetyPanel")
         safety_layout = QGridLayout(safety_panel)
         safety_layout.setContentsMargins(14, 12, 14, 12)
+        safety_layout.setHorizontalSpacing(18)
+        safety_layout.setVerticalSpacing(9)
         boundaries = (
             ("Scan scope", "Immediate child files only; folders are never traversed."),
             ("Move scope", "Same-volume moves only, using the exact Preview destination."),
@@ -496,19 +529,36 @@ class MainWindow(QMainWindow):
         safety_layout.setColumnStretch(1, 1)
         layout.addWidget(safety_panel)
 
+        about_title = QLabel("ABOUT")
+        about_title.setObjectName("groupTitle")
+        layout.addWidget(about_title)
         app_panel = QFrame()
         app_panel.setObjectName("panel")
         app_layout = QGridLayout(app_panel)
         app_layout.setContentsMargins(14, 12, 14, 12)
-        app_layout.addWidget(QLabel("Version"), 0, 0)
-        app_layout.addWidget(QLabel(APP_VERSION), 0, 1)
-        app_layout.addWidget(QLabel("History database"), 1, 0)
+        app_layout.setHorizontalSpacing(12)
+        app_layout.setVerticalSpacing(6)
+        app_layout.addWidget(self._brand_mark(44), 0, 0, 2, 1, Qt.AlignmentFlag.AlignTop)
+        about_name = QLabel(brand_wordmark())
+        about_name.setObjectName("brandName")
+        about_name.setTextFormat(Qt.TextFormat.RichText)
+        app_layout.addWidget(about_name, 0, 1, 1, 2)
+        about_meta = QLabel("by VaultSoft  \u00b7  Preview, organise and safely undo file moves.")
+        about_meta.setObjectName("muted")
+        about_meta.setWordWrap(True)
+        app_layout.addWidget(about_meta, 1, 1, 1, 2)
+        version_title = QLabel("Version")
+        version_title.setObjectName("fieldHint")
+        app_layout.addWidget(version_title, 2, 1)
+        app_layout.addWidget(self._version_pill(), 2, 2, Qt.AlignmentFlag.AlignLeft)
+        database_title = QLabel("History database")
+        database_title.setObjectName("fieldHint")
+        app_layout.addWidget(database_title, 3, 1, Qt.AlignmentFlag.AlignTop)
         database_path = QLabel(self.database.path)
-        database_path.setObjectName("muted")
         database_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         database_path.setWordWrap(True)
-        app_layout.addWidget(database_path, 1, 1)
-        app_layout.setColumnStretch(1, 1)
+        app_layout.addWidget(database_path, 3, 2)
+        app_layout.setColumnStretch(2, 1)
         layout.addWidget(app_panel)
         layout.addStretch(1)
         return page
@@ -619,17 +669,15 @@ class MainWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     item.setForeground(status_color(row.status))
                 self.table.setItem(row_index, column, item)
         tone = "success" if summary.ready else "warning" if presentation.rows else "neutral"
         self._set_banner(self.status_label, presentation.validation_message, tone)
         if presentation.missing_destination_folders:
-            folder_list = "\n".join(presentation.missing_destination_folders)
+            folder_list = ", ".join(presentation.missing_destination_folders)
             self._set_banner(
                 self.missing_folders_banner,
-                "Some destination folders are missing:\n"
-                f"{folder_list}\n\n"
+                f"Some destination folders are missing: {folder_list}.\n"
                 "Create these folders inside the selected folder, then Analyse Again.",
                 "warning",
             )
@@ -1068,12 +1116,16 @@ class MainWindow(QMainWindow):
 def status_color(status: str) -> QColor:
     normalized = status.upper()
     if normalized in {"READY", "VALID", "SUCCEEDED", "COMPLETE"}:
-        return QColor("#00d4aa")
+        return QColor(ACCENT)
     if normalized in {"BLOCKED", "RECOVERY_REQUIRED"}:
-        return QColor("#f85149")
+        return QColor(RED)
     if normalized in {"COLLISION", "UNSUPPORTED", "STALE", "INTERRUPTED"}:
-        return QColor("#e3b341")
-    return QColor("#8b949e")
+        return QColor(AMBER)
+    return QColor(TEXT_SUB)
+
+
+def brand_wordmark() -> str:
+    return f"FILE<span style='color:{ACCENT}'>FLOW</span>"
 
 
 def history_status_color(status: str) -> QColor:
