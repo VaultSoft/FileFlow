@@ -1,7 +1,7 @@
 import unittest
 
 from fileflow.models import FileIdentity, IdentitySnapshot, MetadataSnapshot, SafetyDecision, ScannedItem, ScannedItemKind
-from fileflow.rules import RuleEngine, default_categories, default_rules
+from fileflow.rules import RuleEngine, default_categories, default_rules, test_filename_against_rules
 
 
 def item(path, relative_path="Photo.JPG", size=12):
@@ -57,6 +57,40 @@ class RulesEngineTests(unittest.TestCase):
         engine = RuleEngine((rule,))
         self.assertIsNotNone(engine.match(item(r"C:\Root\Incoming\note.txt", r"Incoming\note.txt")))
         self.assertIsNone(engine.match(item(r"C:\Root\Other\note.txt", r"Other\note.txt")))
+
+    def test_filename_tester_explains_builtin_match_without_filesystem_access(self):
+        categories = default_categories()
+        result = test_filename_against_rules("Holiday.PHOTO.JPG", default_rules(categories), categories)
+        self.assertTrue(result.valid)
+        self.assertTrue(result.matched)
+        self.assertEqual("Images", result.category_name)
+        self.assertEqual("Images", result.destination_folder)
+        self.assertIn("would match Images", result.message)
+
+    def test_filename_tester_leaves_unknown_extension_in_place(self):
+        categories = default_categories()
+        result = test_filename_against_rules("archive.unknown", default_rules(categories), categories)
+        self.assertTrue(result.valid)
+        self.assertFalse(result.matched)
+        self.assertIn("stay in place", result.message)
+
+    def test_filename_tester_rejects_paths_and_empty_values(self):
+        categories = default_categories()
+        rules = default_rules(categories)
+        for value in ("", r"C:\Users\Josh\photo.jpg", r"folder\photo.jpg", ".."):
+            with self.subTest(value=value):
+                result = test_filename_against_rules(value, rules, categories)
+                self.assertFalse(result.valid)
+                self.assertFalse(result.matched)
+
+    def test_filename_tester_skips_conditions_it_cannot_prove(self):
+        from fileflow.models import Rule
+
+        categories = default_categories()
+        size_rule = Rule("large", "Large images", "images", "Images", True, 1, 1, 1, extensions=(".jpg",), min_size=1)
+        result = test_filename_against_rules("photo.jpg", (size_rule,), categories)
+        self.assertTrue(result.valid)
+        self.assertFalse(result.matched)
 
 
 if __name__ == "__main__":

@@ -167,6 +167,105 @@ class PreviewUiTests(unittest.TestCase):
         window.close()
         self.assertIsNotNone(app)
 
+    def test_rules_page_lists_builtin_categories_and_tester_is_non_mutating(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        self.assertEqual(len(window.service.categories), window.rules_table.rowCount())
+        self.assertEqual("Active", window.rules_table.item(0, 0).text())
+        window.rule_test_input.setText("report.PDF")
+        window._test_rule_filename()
+        self.assertIn("would match Documents", window.rule_test_result.text())
+        self.assertFalse(window.apply_button.isEnabled())
+        self.assertIsNone(window.current_analysis)
+        window.close()
+        self.assertIsNotNone(app)
+
+    def test_settings_page_states_fixed_release_boundaries(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication, QLabel
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        text = " ".join(label.text() for label in window.settings_page.findChildren(QLabel))
+        self.assertIn("Same-volume moves only", text)
+        self.assertIn("no overwrite or auto-rename", text)
+        self.assertIn("Recovery", text)
+        window.close()
+        self.assertIsNotNone(app)
+
+    def test_apply_confirmation_defaults_and_escapes_to_cancel(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication, QMessageBox
+            from fileflow.apply_controller import ApplyConfirmationSummary
+            from fileflow.ui.main_window import MainWindow
+        except Exception as exc:
+            self.skipTest(f"PyQt6 UI unavailable: {exc}")
+
+        class FakeMessageBox:
+            ButtonRole = QMessageBox.ButtonRole
+
+            def __init__(self, parent):
+                self.buttons = []
+                self.default = None
+                self.escape = None
+                self.clicked = None
+
+            def setWindowTitle(self, title):
+                self.title = title
+
+            def setText(self, text):
+                self.text = text
+
+            def addButton(self, label, role):
+                button = object()
+                self.buttons.append((label, role, button))
+                if role == QMessageBox.ButtonRole.RejectRole:
+                    self.clicked = button
+                return button
+
+            def setDefaultButton(self, button):
+                self.default = button
+
+            def setEscapeButton(self, button):
+                self.escape = button
+
+            def exec(self):
+                cancel = next(button for label, role, button in self.buttons if label == "Cancel")
+                if self.default is not cancel or self.escape is not cancel:
+                    raise AssertionError("Cancel was not the default and escape action")
+
+            def clickedButton(self):
+                return self.clicked
+
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow()
+        summary = ApplyConfirmationSummary(
+            1,
+            10,
+            r"C:\FileFlowTest\Root",
+            (("Documents", 1),),
+            0,
+            0,
+            0,
+            "Move only the exact ready file.",
+        )
+        with patch("fileflow.ui.main_window.QMessageBox", FakeMessageBox):
+            self.assertFalse(window._confirm_apply(summary))
+        window.close()
+        self.assertIsNotNone(app)
+
     def test_undo_confirmation_defaults_and_escapes_to_cancel(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         try:

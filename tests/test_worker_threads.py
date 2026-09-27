@@ -14,6 +14,7 @@ from fileflow.preview_workflow import PreviewWorkflowService
 from fileflow.storage import Database
 from fileflow.undo import UndoController, UndoControllerState
 from fileflow.workers.apply_worker import ApplyWorker
+from fileflow.workers.preview_worker import PreviewWorker
 from fileflow.workers.undo_worker import UndoWorker
 
 
@@ -74,6 +75,42 @@ def run_in_qthread(worker, timeout_ms: int = 20_000):
 
 
 class WorkerThreadIntegrationTests(unittest.TestCase):
+    @require_windows
+    def test_preview_worker_runs_in_real_qthread_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Root"
+            root.mkdir()
+            (root / "Documents").mkdir()
+            source = root / "report.pdf"
+            source.write_text("preview only", encoding="utf-8")
+            worker = PreviewWorker(PreviewWorkflowService(), str(root))
+
+            observed, stopped, app = run_in_qthread(worker)
+
+            self.assertFalse(observed["timed_out"])
+            self.assertTrue(stopped)
+            self.assertIsNone(observed["error"])
+            self.assertIsNotNone(observed["result"].plan)
+            self.assertEqual(1, len(observed["result"].plan.operations))
+            self.assertTrue(source.exists())
+            self.assertFalse((root / "Documents" / "report.pdf").exists())
+            self.assertIsNotNone(app)
+
+    def test_preview_worker_failure_exits_real_qthread_with_structured_error(self):
+        class RaisingService:
+            def analyse_folder(self, selected_path):
+                raise RuntimeError("injected preview failure")
+
+        worker = PreviewWorker(RaisingService(), r"C:\FileFlowTest\Root")
+        observed, stopped, app = run_in_qthread(worker)
+
+        self.assertFalse(observed["timed_out"])
+        self.assertTrue(stopped)
+        self.assertIsNone(observed["result"])
+        self.assertIsNotNone(observed["error"])
+        self.assertIn("injected preview failure", observed["error"].details["error"])
+        self.assertIsNotNone(app)
+
     @require_windows
     def test_apply_worker_owns_file_database_connection_in_real_qthread(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,6 +269,53 @@ class WorkerThreadIntegrationTests(unittest.TestCase):
                     self.assertIn(expected_error, observed["error"].details["error"])
                     self.assertTrue(closed.is_set())
                     self.assertIsNotNone(app)
+
+    @require_windows
+    def test_apply_then_undo_workers_use_separate_connections_and_persist_both_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Root"
+            root.mkdir()
+            (root / "Documents").mkdir()
+            source = root / "roundtrip.pdf"
+            source.write_text("round trip", encoding="utf-8")
+            database_path = Path(tmp) / "fileflow.db"
+            main_database = Database(database_path)
+            main_database.migrate()
+            try:
+                apply_plan = PreviewWorkflowService().analyse_folder(str(root)).plan
+                apply_closed = threading.Event()
+                apply_worker = ApplyWorker(
+                    str(database_path),
+                    apply_plan,
+                    database_factory=tracking_database_factory(apply_closed),
+                )
+                apply_observed, apply_stopped, app = run_in_qthread(apply_worker)
+                self.assertTrue(apply_stopped)
+                self.assertIsNone(apply_observed["error"])
+                self.assertEqual(ApplyState.COMPLETE, apply_observed["result"].state)
+                self.assertTrue(apply_closed.is_set())
+
+                undo_controller = UndoController(main_database)
+                undo_plan = undo_controller.create_plan(apply_observed["result"].batch_id)
+                undo_closed = threading.Event()
+                undo_worker = UndoWorker(
+                    str(database_path),
+                    undo_plan,
+                    database_factory=tracking_database_factory(undo_closed),
+                )
+                undo_observed, undo_stopped, app = run_in_qthread(undo_worker)
+
+                self.assertTrue(undo_stopped)
+                self.assertIsNone(undo_observed["error"])
+                self.assertEqual(UndoControllerState.COMPLETE, undo_observed["result"].state)
+                self.assertTrue(undo_closed.is_set())
+                self.assertTrue(source.exists())
+                self.assertFalse((root / "Documents" / "roundtrip.pdf").exists())
+                self.assertEqual(1, len(ApplyController(main_database).history_rows()))
+                self.assertEqual(1, len(undo_controller.list_batches()))
+                self.assertIsNotNone(app)
+            finally:
+                main_database.close()
 
 
 if __name__ == "__main__":
