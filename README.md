@@ -2,7 +2,7 @@
 
 FileFlow is a VaultSoft Windows desktop utility for safely organising the immediate files in a folder. It creates an exact, inspectable Preview before anything moves and records every Apply and Undo attempt in a local SQLite journal.
 
-Version `0.1.0` supports controlled same-volume moves and identity-checked Undo.
+Version `0.9.0` supports controlled same-volume moves and identity-checked Undo.
 
 ## What It Does
 
@@ -89,6 +89,6 @@ python -B build.py
 Expected outputs:
 
 - `dist\FileFlow\FileFlow.exe`
-- `dist\FileFlow_v0.1.0_Portable.zip`
+- `dist\FileFlow_v0.9.0_Portable.zip`
 
 See [Release Candidate](docs/RELEASE_CANDIDATE.md), [Safety Model](docs/SAFETY_MODEL.md), [Threading Model](docs/THREADING_MODEL.md), and [Undo Safety](docs/UNDO_SAFETY.md) for the implementation contract.

@@ -1,8 +1,8 @@
 # Test Strategy
 
-## Release Candidate Gate
+## Release Gate
 
-The 0.1.0 release candidate runs the complete standard-library `unittest` suite on Windows, compiles `fileflow` and `tests`, builds the PyInstaller package, launches the packaged executable, and audits the runtime mutation boundary.
+The 0.9.0 release runs the complete standard-library `unittest` suite on Windows, compiles `fileflow` and `tests`, builds the PyInstaller package, launches the packaged executable, and audits the runtime mutation boundary.
 
 Real `QThread` integration coverage uses temporary directories and a file-backed SQLite database. It proves Preview is non-mutating, Apply and Undo each own and close a worker-local connection, stale post-confirmation state blocks without mutation, unexpected failures clean up before emitting, and a complete Apply-to-Undo round trip persists both batches for a separate main-thread connection.
 

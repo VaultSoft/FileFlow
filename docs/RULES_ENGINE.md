@@ -4,9 +4,9 @@ Rules produce intentions. They do not touch the filesystem.
 
 Every planned operation must answer: "Why is FileFlow moving this file?"
 
-## Release Candidate Experience
+## Current Rules Experience
 
-FileFlow 0.1.0 ships a read-only Rules page containing the active built-in category, destination, and extension mappings. A filename tester evaluates only filename and extension conditions in memory. It never reads a file, creates a plan, or authorizes a move; Preview remains authoritative.
+FileFlow 0.9.0 ships a read-only Rules page containing the active built-in category, destination, and extension mappings. A filename tester evaluates only filename and extension conditions in memory. It never reads a file, creates a plan, or authorizes a move; Preview remains authoritative.
 
 Unknown extensions and the inactive Other category stay in place. Editing, importing, persisting, or reordering rules is deferred until those changes have explicit database migration and stale-preview behavior.
 
