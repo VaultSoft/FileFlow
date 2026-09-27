@@ -68,7 +68,7 @@ python -m pip install -r requirements.txt
 python -B -m fileflow
 ```
 
-FileFlow stores history in `%LOCALAPPDATA%\FileFlow\fileflow.db`.
+FileFlow stores history in `%LOCALAPPDATA%\FileFlow\fileflow.db`. This per-user path does not depend on the selected folder, current working directory, packaged executable location, or PyInstaller extraction directory.
 
 ## Test
 

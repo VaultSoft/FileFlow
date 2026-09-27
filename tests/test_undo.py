@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -513,6 +514,68 @@ class UndoIntegrationTests(unittest.TestCase):
                 self.assertEqual(UndoOperationStatus.BLOCKED, repeat_plan.operations[0].status)
             finally:
                 db.close()
+
+    @require_windows
+    def test_apply_history_and_undo_preview_persist_after_clean_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            root = fixture / "Root"
+            root.mkdir()
+            database_path = fixture / "LocalAppData" / "FileFlow" / "fileflow.db"
+            database_path.parent.mkdir(parents=True)
+
+            first_database = Database(database_path)
+            first_database.migrate()
+            _, apply_batch = apply_files(root, first_database, "a.pdf")
+            first_database.close()
+
+            inspection = sqlite3.connect(
+                f"file:{database_path.resolve().as_posix()}?mode=ro",
+                uri=True,
+            )
+            inspection.row_factory = sqlite3.Row
+            try:
+                batch = inspection.execute(
+                    "SELECT status FROM operation_batch WHERE id = ?",
+                    (apply_batch,),
+                ).fetchone()
+                execution = inspection.execute(
+                    "SELECT result, source_before, destination FROM executed_operation WHERE batch_id = ?",
+                    (apply_batch,),
+                ).fetchone()
+                event_count = inspection.execute(
+                    "SELECT COUNT(*) FROM operation_state_event WHERE batch_id = ?",
+                    (apply_batch,),
+                ).fetchone()[0]
+                source_root = inspection.execute(
+                    "SELECT source_root FROM preview_plan WHERE id = (SELECT plan_id FROM operation_batch WHERE id = ?)",
+                    (apply_batch,),
+                ).fetchone()[0]
+            finally:
+                inspection.close()
+
+            self.assertEqual(JournalState.SUCCEEDED.value, batch["status"])
+            self.assertEqual(JournalState.SUCCEEDED.value, execution["result"])
+            self.assertEqual(str(root / "a.pdf"), execution["source_before"])
+            self.assertEqual(str(root / "Documents" / "a.pdf"), execution["destination"])
+            self.assertEqual(str(root), source_root)
+            self.assertGreaterEqual(event_count, 4)
+
+            second_database = Database(database_path)
+            second_database.migrate()
+            try:
+                history = ApplyController(second_database).history_rows()
+                self.assertEqual(1, len(history))
+                self.assertEqual(apply_batch, history[0]["id"])
+                self.assertEqual(JournalState.SUCCEEDED.value, history[0]["status"])
+                self.assertEqual(1, history[0]["succeeded_count"])
+
+                undo_plan = UndoController(second_database).create_plan(apply_batch)
+                self.assertEqual(1, len(undo_plan.ready_operations))
+                self.assertEqual(str(root / "Documents" / "a.pdf"), undo_plan.ready_operations[0].source_path)
+                self.assertEqual(str(root / "a.pdf"), undo_plan.ready_operations[0].restore_path)
+            finally:
+                second_database.close()
 
     @require_windows
     def test_apply_history_is_immutable_and_undo_history_persists_after_reopen(self):
