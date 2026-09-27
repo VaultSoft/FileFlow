@@ -1,5 +1,13 @@
 # Test Strategy
 
+## Release Candidate Gate
+
+The 0.1.0 release candidate runs the complete standard-library `unittest` suite on Windows, compiles `fileflow` and `tests`, builds the PyInstaller package, launches the packaged executable, and audits the runtime mutation boundary.
+
+Real `QThread` integration coverage uses temporary directories and a file-backed SQLite database. It proves Preview is non-mutating, Apply and Undo each own and close a worker-local connection, stale post-confirmation state blocks without mutation, unexpected failures clean up before emitting, and a complete Apply-to-Undo round trip persists both batches for a separate main-thread connection.
+
+UI coverage verifies safe initial states, confirmation default/Escape behavior, built-in Rules presentation, non-mutating filename testing, and visible fixed safety boundaries.
+
 Tests must be designed before implementation. Destructive-operation tests use only controlled temporary directories.
 
 Never test FileFlow against real Desktop, Downloads, Documents, or system folders.

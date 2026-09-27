@@ -2,6 +2,16 @@
 
 PyQt UI work stays on the UI thread. File and database work that can block uses workers.
 
+## Implemented Ownership
+
+- `PreviewWorker` runs folder validation, scanning, and planning in a real `QThread`. It owns no database connection and performs no mutation.
+- `ApplyWorker` receives only a database path and frozen Preview plan. Inside its worker thread it creates, migrates, uses, and closes a worker-local `Database` and `ApplyController`.
+- `UndoWorker` follows the same database-path and worker-local ownership model.
+- `MainWindow` never passes its live SQLite connection or a controller containing that connection into Apply or Undo workers.
+- worker results are emitted only after worker-local database cleanup completes
+
+SQLite uses its default thread check. `check_same_thread=False` is not used.
+
 ## Worker Candidates
 
 Run outside the UI thread:
@@ -27,16 +37,11 @@ Use Hub's QThread signal style as a reference:
 - worker emits structured failure result
 - UI updates only in response to signals
 
-## Cancellation
+## Closing and Cancellation
 
-Scanning and preview generation should be cancellable.
+The release candidate does not expose mid-operation cancellation. Closing the window is refused while Preview, Apply, or Undo is active so a live `QThread` is never destroyed. Apply and Undo finish their current journaled batch and report the verified result.
 
-Apply cancellation is more constrained:
-
-- cancellation requests stop before the next operation
-- an operation already in progress is allowed to complete or fail
-- future cross-volume staged operations must complete their current safe stage before stopping
-- cancellation is journaled as batch status, not hidden
+Any future cancellation design must stop only between operations, journal the result, and preserve the same recovery guarantees. Cross-volume stages are outside the current product boundary.
 
 ## Progress
 

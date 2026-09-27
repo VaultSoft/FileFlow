@@ -1,155 +1,45 @@
 # UX Flow
 
-FileFlow should feel calm, inspectable, and trustworthy. The preview screen is the heart of the product.
-
-## Home
-
-Purpose: start a new organization plan or continue history.
-
-Elements:
-
-- selected recent folders
-- primary action: Select Folder
-- recent batches with status
-- safety note for last batch if any blocked operations exist
-
-## Select Folder
-
-Purpose: choose the root to analyse.
-
-Elements:
-
-- folder picker
-- selected path
-- safety status
-- scan scope: immediate child files only in Milestone 1; recursive analysis appears only after a future reviewed design
-- disabled Apply path until preview exists
-
-## Analyse
-
-Purpose: show scanning progress.
-
-Elements:
-
-- current phase
-- files inspected
-- files matched
-- blocked/skipped count
-- cancel button
+FileFlow is a dense, work-focused Windows utility. Safety state is always visible and real file changes require a Preview plus explicit confirmation.
 
 ## Preview
 
-Most important screen.
+The opening page contains:
 
-Needs to show:
+- selected-folder field and folder picker
+- Analyse command, disabled until the selected root passes safety checks
+- visible status and progress state
+- totals for files, Ready, Blocked, Unsupported, Collisions, skipped folders, and bytes
+- status filter and filename/category search
+- exact source, destination, category, rule reason, and detailed safety state
+- Validate Preview, Analyse Again, and a count-aware Move command
 
-- total files planned
-- total data planned
-- blocked operations
-- conflicts
-- source path
-- destination path
-- rule/category reason
-- safety status
-- undo eligibility
-- filter tabs: All, Safe, Conflicts, Blocked, Unmatched
-- search/filter by filename or category
-- summary grouped by destination folder
+Apply starts disabled. It enables only when the controller reports a current supported plan with at least one actionable operation and no global lockout. Apply uses a safe-default confirmation and second worker-thread revalidation.
 
-Primary actions:
+## Apply Result
 
-- Apply Safe Plan
-- Re-preview
-- Export/Copy Summary later
-- Cancel
+The Preview page reports moved-and-verified, safely failed, blocked/excluded, and recovery-required counts. A consumed plan cannot be applied again. History refreshes from persisted journal state.
 
-Apply is disabled when batch-level safety is blocked. If only some operations are blocked, the UI must make clear whether safe operations can proceed.
+## History and Recovery
 
-## Apply
+History lists newest Apply batches with source folder, counts, recovery state, and status. Selection shows read-only operation details and linked Undo attempts.
 
-Purpose: execute the approved plan.
-
-Elements:
-
-- operation progress
-- current operation
-- success/failure counts
-- bytes moved
-- cancellation state
-
-Apply must show that it is applying an approved plan, not recalculating.
-
-## Result
-
-Purpose: summarize exactly what happened.
-
-Elements:
-
-- succeeded count
-- failed count
-- stale count
-- blocked count
-- skipped count
-- total bytes moved
-- error list grouped by code
-- View History
-- Undo Eligible Operations
-
-## History
-
-Purpose: inspect prior batches.
-
-Elements:
-
-- batches sorted newest first
-- date, folder, result status
-- counts
-- undo status
-- filter by folder/status
+The recovery banner distinguishes clear state, active lock state, unresolved Apply, and unresolved Undo. Unresolved work disables both mutation paths. Recovery evidence is read-only and offers no retry, overwrite, delete, or automatic repair.
 
 ## Undo
 
-Purpose: preview and apply reverse operations.
+An eligible successful Apply batch exposes Preview Undo. The Preview checks current identity and the exact original path and shows every Ready or blocked restore operation.
 
-The authoritative Milestone 3A interaction and confirmation contract is in
-`UNDO_UX.md`. This section remains a high-level navigation summary.
-
-Elements:
-
-- selected batch
-- eligible operations
-- ineligible operations with reasons
-- exact restore paths
-- conflicts
-- Confirm Undo
-
-Undo uses the same preview/apply pattern as normal operations.
+Undo uses a safe-default confirmation and a second worker-thread revalidation. It restores location only; edited contents and metadata move with the same identified file. Successful Undo is persisted separately and never rewrites Apply history.
 
 ## Rules
 
-Purpose: manage simple rules.
+Rules lists the ordered built-in categories, active state, exact destination folder, and extensions. The filename tester is an in-memory explanation tool only. It does not inspect disk or make a file eligible for Apply.
 
-Elements:
+## Settings and Safety
 
-- ordered enabled rules
-- category mappings
-- disabled rules
-- test rule against sample filename/path
-- reset defaults
+The Settings page presents fixed behavior rather than misleading controls: immediate-file scope, same-volume moves, collision blocking, identity-checked Undo, read-only recovery, the 100-operation cap, app version, and local history database path.
 
-Initial version can be read-only defaults plus simple toggles.
+## Window Lifecycle
 
-## Settings
-
-Purpose: safe preferences.
-
-Elements:
-
-- default preview mode
-- recursive scanning controls only after a future reviewed implementation
-- auto-rename setting only after a future reviewed implementation
-- history retention
-- database location
-- diagnostics/export logs
-
-Avoid premium/licensing UI until Pro work begins.
+FileFlow closes normally when idle. While any Preview, Apply, or Undo worker is active, close is refused with a clear message so a running worker thread is never abandoned.

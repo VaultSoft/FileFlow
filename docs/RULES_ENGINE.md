@@ -4,6 +4,12 @@ Rules produce intentions. They do not touch the filesystem.
 
 Every planned operation must answer: "Why is FileFlow moving this file?"
 
+## Release Candidate Experience
+
+FileFlow 0.1.0 ships a read-only Rules page containing the active built-in category, destination, and extension mappings. A filename tester evaluates only filename and extension conditions in memory. It never reads a file, creates a plan, or authorizes a move; Preview remains authoritative.
+
+Unknown extensions and the inactive Other category stay in place. Editing, importing, persisting, or reordering rules is deferred until those changes have explicit database migration and stale-preview behavior.
+
 ## Initial Rule Types
 
 Safe Free-tier rule types:
@@ -64,7 +70,7 @@ FileFlow should add:
 - Spreadsheets can remain under Documents initially
 - Other can be optional and disabled by default
 
-Initial mappings should be hardcoded defaults loaded into database records on first run. This keeps first implementation simple while allowing later editing, import/export, and migrations.
+The release candidate uses versioned hardcoded defaults frozen into each Preview snapshot. Later editable rules will require database records, migrations, and explicit Preview invalidation.
 
 ## Unknown Extensions
 
