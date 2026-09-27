@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import ntpath
 
 from .models import Category, Rule, RuleMatch, ScannedItem
+
+
+@dataclass(frozen=True)
+class FilenameRuleTest:
+    valid: bool
+    matched: bool
+    filename: str
+    category_name: str = ""
+    destination_folder: str = ""
+    rule_name: str = ""
+    message: str = ""
 
 
 def default_categories() -> tuple[Category, ...]:
@@ -76,3 +88,56 @@ class RuleEngine:
         if rule.extensions:
             return f"Extension {extension} matched {rule.name}"
         return f"{filename} matched {rule.name}"
+
+
+def test_filename_against_rules(
+    filename: str,
+    rules: tuple[Rule, ...],
+    categories: tuple[Category, ...],
+) -> FilenameRuleTest:
+    """Explain filename-only matching without reading or changing the filesystem."""
+
+    candidate = filename.strip()
+    if not candidate:
+        return FilenameRuleTest(False, False, candidate, message="Enter a filename to test.")
+    if candidate in (".", "..") or ntpath.basename(candidate) != candidate:
+        return FilenameRuleTest(
+            False,
+            False,
+            candidate,
+            message="Enter a filename only, without a folder path.",
+        )
+
+    extension = ntpath.splitext(candidate)[1].casefold()
+    filename_key = candidate.casefold()
+    ordered = sorted((rule for rule in rules if rule.enabled), key=lambda rule: (rule.priority, rule.sort_order, rule.id))
+    for rule in ordered:
+        # A filename-only test cannot safely evaluate metadata or folder conditions.
+        if rule.min_size is not None or rule.max_size is not None or rule.source_subfolder:
+            continue
+        if rule.extensions and extension not in {item.casefold() for item in rule.extensions}:
+            continue
+        if rule.filename_contains and rule.filename_contains.casefold() not in filename_key:
+            continue
+        if rule.filename_startswith and not filename_key.startswith(rule.filename_startswith.casefold()):
+            continue
+        if rule.filename_endswith and not filename_key.endswith(rule.filename_endswith.casefold()):
+            continue
+        category = next((item for item in categories if item.id == rule.category_id), None)
+        category_name = category.name if category is not None else rule.category_id
+        return FilenameRuleTest(
+            True,
+            True,
+            candidate,
+            category_name,
+            rule.destination_folder,
+            rule.name,
+            f"{candidate} would match {category_name} and preview a move into {rule.destination_folder}.",
+        )
+
+    return FilenameRuleTest(
+        True,
+        False,
+        candidate,
+        message=f"{candidate} does not match an active built-in rule and would stay in place.",
+    )
