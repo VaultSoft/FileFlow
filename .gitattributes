@@ -1,0 +1,4 @@
+# Licence texts are kept byte-for-byte as published upstream:
+# no line-ending conversion, no whitespace fixes.
+LICENSE -text -whitespace
+LICENSES/** -text -whitespace

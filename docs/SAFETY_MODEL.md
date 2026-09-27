@@ -92,7 +92,7 @@ The safety service should block selecting or writing directly to:
 - `Program Files`.
 - `Program Files (x86)`.
 - `ProgramData`.
-- User profile root, for example `C:\Users\Josh`.
+- User profile root, for example `C:\Users\YourName`.
 - Other user profile roots under `C:\Users`.
 - Recycle Bin and system volume metadata folders.
 

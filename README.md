@@ -1,8 +1,12 @@
 # FileFlow
 
+**Free and open source · Portable Windows utility · Version 0.9.0 · Licence: GPL-3.0**
+
 FileFlow is a VaultSoft Windows desktop utility for safely organising the immediate files in a folder. It creates an exact, inspectable Preview before anything moves and records every Apply and Undo attempt in a local SQLite journal.
 
 Version `0.9.0` supports controlled same-volume moves and identity-checked Undo.
+
+Download and screenshots: <https://vaultsoft.co.uk/fileflow/>. FileFlow is also listed in [VaultSoft Hub](https://github.com/VaultSoft/vaultsoft-hub).
 
 ## What It Does
 
@@ -43,7 +47,7 @@ The Rules page documents the active built-in mappings and includes a filename-on
 
 ## Portable Use
 
-1. Download the portable ZIP.
+1. Download `FileFlow_v0.9.0_Portable.zip` from the [v0.9.0 release](https://github.com/VaultSoft/FileFlow/releases/tag/v0.9.0).
 2. Extract the ZIP to a normal local folder.
 3. Run `FileFlow.exe` from the extracted `FileFlow` folder.
 
@@ -94,3 +98,11 @@ Expected outputs:
 The .exe icon is the committed `icon.ico`. It is rendered from the in-app mark in `fileflow/ui/branding.py`; after changing that drawing, run `python -B make_icon.py` (needs Pillow) and commit the new `icon.ico`.
 
 See [Release Candidate](docs/RELEASE_CANDIDATE.md), [Safety Model](docs/SAFETY_MODEL.md), [Threading Model](docs/THREADING_MODEL.md), and [Undo Safety](docs/UNDO_SAFETY.md) for the implementation contract.
+
+## Licence
+
+FileFlow is free and open source software under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-only). Copyright © 2026 VaultSoft.
+
+FileFlow is built on PyQt6, which is distributed under the GPL, so FileFlow uses GPL-3.0 as well. The portable ZIP also contains Qt (LGPL-3.0), CPython and other components under their own licences: see [Third-party notices](THIRD_PARTY_NOTICES.md) and the [`LICENSES`](LICENSES) folder.
+
+Questions or problems: support@vaultsoft.co.uk

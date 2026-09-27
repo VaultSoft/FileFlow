@@ -126,9 +126,10 @@ class PreviewUiTests(unittest.TestCase):
         self.assertIn("Analyse again", presentation.message)
         self.assertIn("destination appeared", presentation.reasons[0])
 
+    @patch.dict("os.environ", {"USERPROFILE": r"C:\Users\Demo"})
     def test_folder_selection_blocks_reparse_root(self):
         policy = WindowsPathPolicy()
-        root = r"C:\Users\Josh\Downloads\FileFlowRoot"
+        root = r"C:\Users\Demo\Downloads\FileFlowRoot"
         service = PreviewWorkflowService(
             path_policy=policy,
             chain_safety=PathChainSafety(policy, FakeReparseInspector({root})),

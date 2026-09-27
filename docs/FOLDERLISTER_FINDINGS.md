@@ -1,6 +1,6 @@
 # FolderLister Findings
 
-Reference inspected: `C:\Users\Josh\FolderLister\main.py`.
+Reference inspected: `main.py` in FolderLister, a separate VaultSoft project.
 
 FolderLister is useful prior art for FileFlow's user intent, category vocabulary, and preview-first shape. It is not a safe implementation model for FileFlow's filesystem engine.
 

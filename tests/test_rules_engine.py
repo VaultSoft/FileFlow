@@ -20,13 +20,13 @@ def item(path, relative_path="Photo.JPG", size=12):
 class RulesEngineTests(unittest.TestCase):
     def test_default_rules_match_extensions_case_insensitively(self):
         engine = RuleEngine(default_rules(default_categories()))
-        match = engine.match(item(r"C:\Users\Josh\Downloads\PHOTO.JPG"))
+        match = engine.match(item(r"C:\Users\Demo\Downloads\PHOTO.JPG"))
         self.assertIsNotNone(match)
         self.assertEqual("images", match.rule.category_id)
 
     def test_unknown_extensions_do_not_match_by_default(self):
         engine = RuleEngine(default_rules(default_categories()))
-        self.assertIsNone(engine.match(item(r"C:\Users\Josh\Downloads\unknown.zzz", "unknown.zzz")))
+        self.assertIsNone(engine.match(item(r"C:\Users\Demo\Downloads\unknown.zzz", "unknown.zzz")))
 
     def test_order_uses_priority_sort_order_and_id(self):
         from fileflow.models import Rule
@@ -36,7 +36,7 @@ class RulesEngineTests(unittest.TestCase):
             Rule("a", "First", "documents", "Documents", True, 10, 1, 1, extensions=(".txt",)),
             Rule("c", "Highest", "documents", "Documents", True, 20, 0, 1, extensions=(".txt",)),
         )
-        match = RuleEngine(rules).match(item(r"C:\Users\Josh\Downloads\note.txt", "note.txt"))
+        match = RuleEngine(rules).match(item(r"C:\Users\Demo\Downloads\note.txt", "note.txt"))
         self.assertEqual("a", match.rule.id)
 
     def test_source_subfolder_is_root_relative_case_insensitive(self):
@@ -77,7 +77,7 @@ class RulesEngineTests(unittest.TestCase):
     def test_filename_tester_rejects_paths_and_empty_values(self):
         categories = default_categories()
         rules = default_rules(categories)
-        for value in ("", r"C:\Users\Josh\photo.jpg", r"folder\photo.jpg", ".."):
+        for value in ("", r"C:\Users\Demo\photo.jpg", r"folder\photo.jpg", ".."):
             with self.subTest(value=value):
                 result = test_filename_against_rules(value, rules, categories)
                 self.assertFalse(result.valid)
